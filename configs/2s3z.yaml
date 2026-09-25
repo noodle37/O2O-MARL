@@ -1,0 +1,51 @@
+# Paper OVMSE — arXiv:2410.19450 Appendix (2s3z, Medium)
+system_name: "ovmse_paper 2s3z"
+seed: 1
+wandb_project: og-marl
+phase: offline  # offline | online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 2
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/ovmse_paper_2s3z
+behaviour_cache_dir: checkpoints/ovmse_paper_2s3z/behaviour
+checkpoint_path: checkpoints/ovmse_paper_2s3z/ovmse_paper_seed1_best.pt
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 2s3z
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 50
+  grad_norm_clip: 1.0
+  add_agent_id_to_obs: true
+  raw_cql: true
+  moderate_lambda: false
+  cql_weight: 0.05
+  num_ood_actions: 100
+  online_cql_weight: 0.05
+  mixing_ratio: 0.0
+  lambda_memory_end: 1.0
+  lambda_anneal_steps: 0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+
+# Online overrides (set phase: online and t_max: 1000000)
+online:
+  t_max: 1000000
+  use_ovm: true
