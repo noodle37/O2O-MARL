@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +39,22 @@ class TerminalLogger(BaseLogger):
                 self._last_log = time.time()
 
         self._ctr += 1
+
+
+class JsonlLogger(BaseLogger):
+    """Append each forced eval record to a jsonl file and echo it."""
+
+    def __init__(self, path: str):
+        self.path = path
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    def write(self, logs: Dict[str, Any], force: bool = False) -> None:
+        if not force:
+            return
+        row = {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in logs.items()}
+        with open(self.path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+        print(" ".join(f"{k}={row[k]}" for k in row), flush=True)
 
 
 class WandbLogger(BaseLogger):

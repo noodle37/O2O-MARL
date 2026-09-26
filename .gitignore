@@ -5,3 +5,5 @@ checkpoints/
 vaults/
 wandb/
 .pytest_cache/
+*.pdf
+experiments/

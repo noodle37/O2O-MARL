@@ -83,6 +83,26 @@ def run_offline(cfg: Dict[str, Any]) -> str:
             break
         logger.write({**logs, "t_env": t_env, "training_sps": 0.0})
 
+    if test_interval > 0:
+        eval_logs = evaluate(env, learner, num_eval, t_env, cfg)
+        logger.write(eval_logs | {"evaluation/training_steps": t_env, "t_env": t_env}, force=True)
+        if save_best and ckpt_dir:
+            mean_ret = float(eval_logs.get("evaluation/mean_episode_return", float("-inf")))
+            if mean_ret > best_return:
+                best_return = mean_ret
+                best_path = save_qmix_checkpoint(
+                    ckpt_dir,
+                    learner,
+                    include_optimizer=True,
+                    extra={
+                        "seed": int(cfg["seed"]),
+                        "best_eval_return": mean_ret,
+                        "t_env": t_env,
+                        "phase": "offline",
+                    },
+                    default_name=f"ovmse_paper_seed{cfg['seed']}_best.pt",
+                )
+
     final_path = ""
     if ckpt_dir:
         final_path = save_qmix_checkpoint(

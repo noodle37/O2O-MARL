@@ -10,7 +10,7 @@ from data.vault_dataset import EpisodeDataset, load_episode_dataset_from_vault
 from data.vault_download import download_and_unzip_vault
 from envs import get_environment
 from ovmse.learner import PaperQMIXLearner
-from utils.logger import WandbLogger
+from utils.logger import JsonlLogger, WandbLogger
 from utils.paths import VAULT_DIR
 
 
@@ -67,7 +67,10 @@ def make_env(cfg: Dict[str, Any], seed: int):
     )
 
 
-def make_logger(cfg: Dict[str, Any]) -> WandbLogger:
+def make_logger(cfg: Dict[str, Any]):
+    log_path = cfg.get("log_path")
+    if log_path:
+        return JsonlLogger(str(log_path))
     return WandbLogger(
         project=cfg.get("wandb_project", "og-marl"),
         config={**cfg},

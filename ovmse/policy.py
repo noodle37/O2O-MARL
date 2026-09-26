@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -27,6 +27,15 @@ class EvalPolicyMixin:
         state = self.new_episode_state()
         self.eval_rnn = state["rnn"]
         self.eval_last_actions = state["last"]
+        self.eval_offline_rnn = None
+        self.eval_offline_last_actions = None
+        offline_net = getattr(self, "offline_q_network", None)
+        if offline_net is not None:
+            self.eval_offline_rnn = {
+                f"agent_{i}": offline_net.initial_state(1, self.device)
+                for i in range(self.n_agents)
+            }
+            self.eval_offline_last_actions = {}
 
     def select_actions_eval(
         self,
@@ -34,6 +43,7 @@ class EvalPolicyMixin:
         legals: Dict[str, np.ndarray],
         eps: float,
         state: Optional[Dict[str, Any]] = None,
+        trace: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, int]:
         if state is None:
             rnn_state = self.eval_rnn
@@ -43,6 +53,15 @@ class EvalPolicyMixin:
             last_actions = state["last"]
         epsilon_dec = 0.0 if eps <= 0.0 else eps / self.n_agents
         actions = {}
+        chosen_q: List[float] = []
+        offline_chosen_q: List[float] = []
+        n_disagree = 0
+        score_offline = (
+            trace is not None
+            and state is None
+            and getattr(self, "offline_q_network", None) is not None
+            and getattr(self, "eval_offline_rnn", None) is not None
+        )
         for i, agent in enumerate(sorted(observations.keys())):
             obs = torch.from_numpy(observations[agent]).float().to(self.device)
             last_idx = last_actions.get(agent)
@@ -66,4 +85,49 @@ class EvalPolicyMixin:
                 a = int(torch.argmax(q).item())
             last_actions[agent] = a
             actions[agent] = a
+            if trace is not None:
+                chosen_q.append(float(q[a].item()))
+                if score_offline:
+                    off_q, off_a = self._offline_q_and_greedy(
+                        agent, i, observations[agent], legal, a
+                    )
+                    offline_chosen_q.append(off_q)
+                    n_disagree += int(off_a != a)
+        if trace is not None:
+            trace["chosen_q"] = chosen_q
+            trace["n_disagree"] = n_disagree
+            trace["n_agents"] = len(chosen_q)
+            if score_offline:
+                trace["offline_chosen_q"] = offline_chosen_q
         return actions
+
+    def _offline_q_and_greedy(
+        self,
+        agent: str,
+        agent_index: int,
+        observation: np.ndarray,
+        legal: torch.Tensor,
+        executed_action: int,
+    ) -> tuple[float, int]:
+        """Q and greedy action of the frozen offline net on the executed trajectory."""
+        last_actions = self.eval_offline_last_actions
+        last_idx = last_actions.get(agent)
+        if last_idx is None:
+            last_oh = torch.zeros(self.n_actions, device=self.device)
+        else:
+            last_oh = F.one_hot(
+                torch.tensor(int(last_idx), device=self.device), self.n_actions
+            ).float()
+        pieces = [torch.from_numpy(observation).float().to(self.device), last_oh]
+        if self.add_agent_id_to_obs:
+            pieces.append(
+                F.one_hot(torch.tensor(agent_index, device=self.device), self.n_agents).float()
+            )
+        obs_in = torch.cat(pieces, dim=-1).unsqueeze(0)
+        q, self.eval_offline_rnn[agent] = self.offline_q_network(
+            obs_in, self.eval_offline_rnn.get(agent)
+        )
+        q = q[0].masked_fill(~legal, -1e9)
+        greedy = int(torch.argmax(q).item())
+        last_actions[agent] = executed_action
+        return float(q[executed_action].item()), greedy

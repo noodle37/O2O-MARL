@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -118,6 +119,8 @@ class PaperQMIXLearner(
         self._bc_epochs_since_best = 0
         self.eval_rnn: Dict[str, torch.Tensor] = {}
         self.eval_last_actions: Dict[str, Optional[int]] = {}
+        self.eval_offline_rnn = None
+        self.eval_offline_last_actions = None
 
     def _resets_from_batch(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         filled = batch["filled"]
@@ -200,6 +203,22 @@ class PaperQMIXLearner(
         with torch.no_grad():
             target_tot = self.target_mixer(target_max_qs, states)
         return chosen_tot, target_tot, rewards
+
+    @torch.no_grad()
+    def mix_agent_qs(
+        self,
+        agent_qs: List[float],
+        state: np.ndarray,
+        *,
+        offline: bool = False,
+    ) -> float:
+        """Q_tot of one joint action. agent_qs follows sorted agent id order."""
+        mixer = self.offline_mixer if offline else self.mixer
+        if mixer is None:
+            raise RuntimeError("offline mixer is not loaded")
+        qs = torch.tensor(agent_qs, dtype=torch.float32, device=self.device).view(1, 1, -1)
+        st = torch.as_tensor(state, dtype=torch.float32, device=self.device).view(1, 1, -1)
+        return float(mixer(qs, st).reshape(-1)[0].item())
 
     def train_on_batch(
         self,
