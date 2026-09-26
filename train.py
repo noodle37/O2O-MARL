@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 from omegaconf import OmegaConf
 
-from og_marl.baselines.torch_systems.checkpointing import ensure_project_root
-from train_loop import run_offline, run_online
+from training.offline import run_offline
+from training.online import run_online
+from utils.paths import ensure_project_root
 
 
 def _load_cfg(path: str, overrides: list[str]) -> dict:

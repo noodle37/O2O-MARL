@@ -1,3 +1,7 @@
 logs/
 __pycache__/
 *.pyc
+checkpoints/
+vaults/
+wandb/
+.pytest_cache/
