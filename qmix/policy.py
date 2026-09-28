@@ -14,6 +14,14 @@ import torch.nn.functional as F
 class EvalPolicyMixin:
     """Requires host: n_agents, n_actions, add_agent_id_to_obs, device, q_network."""
 
+    @staticmethod
+    def linear_epsilon(t_env: int, eps_start: float, eps_min: float, decay_steps: int) -> float:
+        """Linear decay eps_start -> eps_min over decay_steps, clamped at eps_min."""
+        if decay_steps <= 0 or t_env >= decay_steps:
+            return eps_min
+        return eps_start + (eps_min - eps_start) * (t_env / decay_steps)
+
+
     def new_episode_state(self) -> Dict[str, Any]:
         return {
             "rnn": {

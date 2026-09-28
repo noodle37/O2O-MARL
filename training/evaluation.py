@@ -8,13 +8,13 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from ovmse.learner import PaperQMIXLearner
+from qmix.core import QMIXBase
 from training.q_metrics import summarize_q_traces
 
 
 def evaluate(
     env,
-    learner: PaperQMIXLearner,
+    learner: QMIXBase,
     n_episodes: int,
     t_env: int,
     cfg: Dict[str, Any],

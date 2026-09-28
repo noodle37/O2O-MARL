@@ -10,10 +10,10 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 
-from ovmse.learner import PaperQMIXLearner
+from qmix.core import QMIXBase
 
 
-def collect_parallel(envs, learner: PaperQMIXLearner, eps: float) -> List[Dict[str, Any]]:
+def collect_parallel(envs, learner: QMIXBase, eps: float) -> List[Dict[str, Any]]:
     n = len(envs)
     states = [learner.new_episode_state() for _ in range(n)]
     episodes = [{"steps": [], "length": 0} for _ in range(n)]
@@ -59,7 +59,7 @@ def collect_parallel(envs, learner: PaperQMIXLearner, eps: float) -> List[Dict[s
     return episodes
 
 
-def collect_episode(env, learner: PaperQMIXLearner, eps: float) -> Dict[str, Any]:
+def collect_episode(env, learner: QMIXBase, eps: float) -> Dict[str, Any]:
     learner.reset_eval_hidden()
     obs, info = env.reset()
     steps = []

@@ -1,0 +1,53 @@
+# MaCal-QL — Cal-QL calibrated conservatism on joint QMIX Q_tot (5m_vs_6m, Medium).
+# Spec: k=10 candidates, dual alpha with target action gap 0.8 (SMAC sparse reward),
+# gamma of mc_return matches training gamma, timeout-truncated episodes drop the anchor.
+learner_type: macal_ql
+system_name: "macal_ql 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: offline
+t_max: 10000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/macal_5m_vs_6m
+checkpoint_path: checkpoints/macal_5m_vs_6m/macal_ql_seed1_best.pt
+log_path: checkpoints/macal_5m_vs_6m/offline.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  grad_norm_clip: 10.0
+  target_update_interval: 200
+  add_agent_id_to_obs: true
+  num_ood_actions: 10
+  cql_weight: 1.0
+  dual_alpha: true
+  target_action_gap: 0.8
+  alpha_lr: 0.0001
+  alpha_init: 1.0
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  mixing_ratio: 0.1
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 100000
+
+transfer:
+  mode: none

@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from ovmse.networks import QMixer, MarlcRNN
+from qmix.networks import QMixer, MarlcRNN
 
 
 TRANSFER_MODES = frozenset(
@@ -21,6 +21,7 @@ TRANSFER_MODES = frozenset(
         "rank_break",
         "shift_plus",
         "shift_minus",
+        "none",
         "scratch",
     }
 )
@@ -99,7 +100,7 @@ def apply_transfer(
     if mode not in TRANSFER_MODES:
         raise ValueError(f"Unknown transfer mode {mode}; expected one of {sorted(TRANSFER_MODES)}")
 
-    if mode == "scratch":
+    if mode in ("scratch", "none"):
         return mode
 
     if mode == "rank_only":

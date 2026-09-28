@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from data.vault_dataset import print_dataset_stats
+from macal.learner import MaCalQLLearner
 from ovmse.transfer import apply_transfer
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
@@ -67,7 +68,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         _load_learner_weights(learner, payload)
 
     # Frozen offline nets for diagnostics (and OVM targets); always from the offline checkpoint file.
-    learner.load_offline_for_ovm(ckpt)
+    if hasattr(learner, "load_offline_for_ovm"):
+        learner.load_offline_for_ovm(ckpt)
 
     use_ovm = mode == "ovmse"
     learner.use_ovm = use_ovm
@@ -127,9 +129,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
     last_test_t = -test_interval
 
     def eps_at(t: int) -> float:
-        if t >= eps_decay:
-            return eps_min
-        return eps_start + (eps_min - eps_start) * (t / eps_decay)
+        return learner.linear_epsilon(t, eps_start, eps_min, eps_decay)
 
     while t_env < t_max:
         if test_interval > 0 and t_env - last_test_t >= test_interval:
@@ -168,17 +168,27 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             )
             if offline_bs > 0:
                 train_batch = merge_offline_online(
-                    offline_data.sample(offline_bs, rng), online_batch, mixing_ratio
+                    offline_data.sample(offline_bs, rng, device=learner.device),
+                    online_batch,
+                    mixing_ratio,
                 )
             else:
                 train_batch = online_batch
-            logs = learner.train_on_batch(
-                train_batch,
-                cql_weight=online_cql,
-                use_ovm=use_ovm,
-                t_env=t_env,
-                episode_delta=batch_size_run,
-            )
+            if isinstance(learner, MaCalQLLearner):
+                logs = learner.train_on_batch(
+                    train_batch,
+                    t_env=t_env,
+                    episode_delta=batch_size_run,
+                    eps=eps_at(t_env),
+                )
+            else:
+                logs = learner.train_on_batch(
+                    train_batch,
+                    cql_weight=online_cql,
+                    use_ovm=use_ovm,
+                    t_env=t_env,
+                    episode_delta=batch_size_run,
+                )
             logger.write(
                 {**logs, "t_env": t_env, "online_buffer": len(online_buffer), "transfer/mode": mode}
             )

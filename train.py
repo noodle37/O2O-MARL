@@ -50,6 +50,8 @@ def main() -> None:
             cfg["system"]["use_ovm"] = False
         elif online_block.get("use_ovm") is not None:
             cfg["system"]["use_ovm"] = online_block["use_ovm"]
+        if online_block.get("test_interval") is not None:
+            cfg["test_interval"] = online_block["test_interval"]
         run_online(cfg)
     elif phase == "offline":
         run_offline(cfg)

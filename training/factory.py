@@ -9,14 +9,43 @@ from typing import Any, Dict
 from data.vault_dataset import EpisodeDataset, load_episode_dataset_from_vault
 from data.vault_download import download_and_unzip_vault
 from envs import get_environment
+from macal.learner import MaCalQLLearner
 from ovmse.learner import PaperQMIXLearner
+from qmix.core import QMIXBase
 from utils.logger import JsonlLogger, WandbLogger
 from utils.paths import VAULT_DIR
 
 
-def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> PaperQMIXLearner:
+def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
     s = dataset.stats
     sys_cfg = cfg["system"]
+    learner_type = str(cfg.get("learner_type", "ovmse_paper")).lower()
+    if learner_type == "macal_ql":
+        return MaCalQLLearner(
+            n_agents=s.n_agents,
+            n_actions=s.n_actions,
+            obs_dim=s.obs_dim,
+            state_dim=s.state_dim,
+            recurrent_layer_dim=int(sys_cfg.get("recurrent_layer_dim", 64)),
+            mixer_embed_dim=int(sys_cfg.get("mixer_embed_dim", 32)),
+            mixer_hyper_dim=int(sys_cfg.get("mixer_hyper_dim", 64)),
+            learning_rate=float(sys_cfg.get("learning_rate", 1e-3)),
+            gamma=float(sys_cfg.get("discount", 0.99)),
+            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 10.0)),
+            target_update_interval=int(sys_cfg.get("target_update_interval", 200)),
+            batch_size_run=int(cfg.get("batch_size_run", 1)),
+            add_agent_id_to_obs=bool(sys_cfg.get("add_agent_id_to_obs", True)),
+            num_ood_actions=int(sys_cfg.get("num_ood_actions", 10)),
+            cql_weight=float(sys_cfg.get("cql_weight", 1.0)),
+            dual_alpha=bool(sys_cfg.get("dual_alpha", True)),
+            target_action_gap=float(sys_cfg.get("target_action_gap", 0.8)),
+            alpha_lr=float(sys_cfg.get("alpha_lr", 1e-4)),
+            alpha_init=float(sys_cfg.get("alpha_init", 1.0)),
+            eps_min=float(sys_cfg.get("eps_min", 0.05)),
+            device=str(sys_cfg.get("device", "cuda")),
+        )
+    if learner_type != "ovmse_paper":
+        raise ValueError(f"Unknown learner_type {learner_type!r}")
     return PaperQMIXLearner(
         n_agents=s.n_agents,
         n_actions=s.n_actions,
@@ -57,7 +86,7 @@ def load_vault_dataset(cfg: Dict[str, Any]) -> EpisodeDataset:
         task["scenario"],
         str(task["dataset"]),
         rel_dir=str(VAULT_DIR),
-        device=str(cfg["system"].get("device", "cuda")),
+        device=str(cfg["system"].get("data_device", cfg["system"].get("device", "cuda"))),
     )
 
 

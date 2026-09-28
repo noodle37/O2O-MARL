@@ -17,7 +17,7 @@ from envs.discrete_mujoco_actions import (
     index_to_continuous,
     n_discrete_actions,
 )
-from ovmse.networks import MarlcRNN, QMixer
+from qmix.networks import MarlcRNN, QMixer
 from ovmse.transfer import (
     affine_rescale_fc2_preserving_argmax,
     apply_transfer,

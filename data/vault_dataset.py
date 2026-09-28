@@ -64,13 +64,18 @@ class EpisodeDataset:
         self.device = obs.device
         self.n_episodes = int(obs.shape[0])
 
-    def sample(self, batch_size: int, rng: Optional[np.random.Generator] = None) -> Dict[str, torch.Tensor]:
+    def sample(
+        self,
+        batch_size: int,
+        rng: Optional[np.random.Generator] = None,
+        device: Optional[torch.device | str] = None,
+    ) -> Dict[str, torch.Tensor]:
         if rng is None:
             rng = np.random.default_rng()
         n = min(batch_size, self.n_episodes)
         idx = rng.choice(self.n_episodes, size=n, replace=False)
         idx_t = torch.as_tensor(idx, device=self.device, dtype=torch.long)
-        return {
+        batch = {
             "obs": self.obs.index_select(0, idx_t),
             "actions": self.actions.index_select(0, idx_t),
             "state": self.state.index_select(0, idx_t),
@@ -79,6 +84,11 @@ class EpisodeDataset:
             "terminated": self.terminated.index_select(0, idx_t),
             "filled": self.filled.index_select(0, idx_t),
         }
+        if device is not None:
+            target = torch.device(device)
+            if batch["obs"].device != target:
+                batch = {key: value.to(target) for key, value in batch.items()}
+        return batch
 
     @property
     def total_filled_steps(self) -> int:

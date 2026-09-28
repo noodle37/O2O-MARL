@@ -53,7 +53,7 @@ class BehaviourCloningMixin:
         self._bc_epochs_since_best = 0
         best_state = copy.deepcopy(self.behaviour_network.state_dict())
         while filled_budget < self.max_behaviour_filled_steps:
-            batch = dataset.sample(batch_size, rng)
+            batch = dataset.sample(batch_size, rng, device=self.device)
             actions = batch["actions"][:, :-1].long()
             avail = batch["avail_actions"][:, :-1]
             terminated = batch["terminated"][:, :-1].float()
