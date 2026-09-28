@@ -20,6 +20,12 @@ except ImportError:
     from envs.custom.multiagent_mujoco.mujoco_multi import MujocoMulti
 
 from envs.base import BaseEnvironment, ResetReturn, StepReturn
+from envs.discrete_mujoco_actions import (
+    all_legal_mask,
+    continuous_to_index,
+    index_to_continuous,
+    n_discrete_actions,
+)
 
 
 def get_mamujoco_args(scenario: str) -> Dict[str, Any]:
@@ -97,3 +103,35 @@ class MAMuJoCo(BaseEnvironment):
             return self.__getattribute__(name)
         else:
             return getattr(self._environment, name)
+
+
+class DiscreteMAMuJoCo(MAMuJoCo):
+    """MuJoCo with per-agent discrete torque bins for QMIX / OVMSE."""
+
+    def __init__(self, scenario: str, seed: Optional[int] = 42):
+        super().__init__(scenario, seed=seed)
+        self._scenario = scenario
+        self.num_actions = n_discrete_actions(scenario)
+        self._legal = all_legal_mask(scenario)
+
+    def _legals_dict(self) -> Dict[str, np.ndarray]:
+        return {agent: self._legal.copy() for agent in self.agents}
+
+    def reset(self) -> ResetReturn:
+        observations, info = super().reset()
+        info["legals"] = self._legals_dict()
+        return observations, info
+
+    def step(self, actions: Dict[str, np.ndarray]) -> StepReturn:
+        mujoco_actions: list = []
+        for agent in self.agents:
+            a = actions[agent]
+            if np.isscalar(a) or (isinstance(a, np.ndarray) and a.shape == ()):
+                idx = int(a)
+            else:
+                idx = int(np.asarray(a).reshape(-1)[0])
+            mujoco_actions.append(index_to_continuous(idx, self._scenario))
+        continuous = {agent: mujoco_actions[i] for i, agent in enumerate(self.agents)}
+        obs, rewards, terminals, truncations, info = super().step(continuous)
+        info["legals"] = self._legals_dict()
+        return obs, rewards, terminals, truncations, info

@@ -50,3 +50,6 @@ system:
 online:
   t_max: 3000000
   use_ovm: true
+
+transfer:
+  mode: ovmse

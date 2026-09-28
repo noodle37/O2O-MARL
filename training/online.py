@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from data.vault_dataset import print_dataset_stats
+from ovmse.transfer import apply_transfer
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
 from training.rollout import collect_parallel, merge_offline_online, stack_episodes
@@ -32,30 +33,80 @@ def _resolve_offline_checkpoint(cfg: Dict[str, Any], offline_ckpt: Optional[str]
     raise FileNotFoundError(f"Online requires offline checkpoint, tried: {candidates}")
 
 
-def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
-    offline_data = load_vault_dataset(cfg)
-    print_dataset_stats(offline_data, label="online_offline_vault")
-    learner = build_learner(cfg, offline_data)
-    ckpt = _resolve_offline_checkpoint(cfg, offline_ckpt)
-    payload = torch.load(ckpt, map_location=learner.device, weights_only=False)
+def _transfer_mode(cfg: Dict[str, Any]) -> str:
+    block = cfg.get("transfer") or {}
+    return str(block.get("mode", "ovmse")).lower()
+
+
+def _load_learner_weights(learner, payload: Dict[str, Any]) -> None:
     learner.q_network.load_state_dict(payload["q_network"])
     learner.mixer.load_state_dict(payload["mixer"])
     learner.target_q_network.load_state_dict(payload.get("target_q_network", payload["q_network"]))
     learner.target_mixer.load_state_dict(payload.get("target_mixer", payload["mixer"]))
     if "optimizer" in payload:
         learner.optimizer.load_state_dict(payload["optimizer"])
-    use_ovm = bool(cfg["system"].get("use_ovm", True))
-    if use_ovm:
-        learner.load_offline_for_ovm(ckpt)
+    if "training_step_ctr" in payload:
+        learner.training_step_ctr = int(payload["training_step_ctr"])
+
+
+def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
+    offline_data = load_vault_dataset(cfg)
+    print_dataset_stats(offline_data, label="online_offline_vault")
+    learner = build_learner(cfg, offline_data)
+
+    mode = _transfer_mode(cfg)
+    transfer_block = cfg.get("transfer") or {}
+    shift = float(transfer_block.get("shift", 0.0))
+    perm_seed = int(transfer_block.get("perm_seed", int(cfg["seed"]) + 17))
+    mixer_seed = int(transfer_block.get("mixer_reinit_seed", int(cfg["seed"]) + 23))
+
+    ckpt = _resolve_offline_checkpoint(cfg, offline_ckpt)
+    payload = torch.load(ckpt, map_location=learner.device, weights_only=False)
+
+    if mode != "scratch":
+        _load_learner_weights(learner, payload)
+
+    # Frozen offline nets for diagnostics (and OVM targets); always from the offline checkpoint file.
+    learner.load_offline_for_ovm(ckpt)
+
+    use_ovm = mode == "ovmse"
     learner.use_ovm = use_ovm
-    print(f"online use_ovm={use_ovm} loaded={ckpt}")
 
     batch_size_run = int(cfg.get("batch_size_run", 1))
-    envs = [
-        make_env(cfg, seed=int(cfg["seed"]) + i)
-        for i in range(batch_size_run)
-    ]
+    envs = [make_env(cfg, seed=int(cfg["seed"]) + i) for i in range(batch_size_run)]
     logger = make_logger(cfg)
+
+    if mode in ("shift_plus", "shift_minus") and shift <= 0.0:
+        pre = evaluate(envs[0], learner, int(cfg.get("num_eval_episodes", 32)), 0, cfg)
+        shift = abs(float(pre.get("evaluation/q_bias", 1.0)))
+        if shift < 1e-6:
+            shift = 1.0
+        logger.write(
+            pre
+            | {
+                "evaluation/training_steps": 0,
+                "t_env": 0,
+                "transfer/inferred_shift": shift,
+                "transfer/mode": mode,
+            },
+            force=True,
+        )
+    else:
+        pre = evaluate(envs[0], learner, int(cfg.get("num_eval_episodes", 32)), 0, cfg)
+        logger.write(
+            pre
+            | {"evaluation/training_steps": 0, "t_env": 0, "transfer/mode": mode},
+            force=True,
+        )
+
+    apply_transfer(
+        learner,
+        mode,
+        shift=shift,
+        perm_seed=perm_seed,
+        mixer_reinit_seed=mixer_seed,
+    )
+    print(f"online transfer_mode={mode} use_ovm={use_ovm} shift={shift} offline_ckpt={ckpt}")
 
     t_max = int(cfg["t_max"])
     test_interval = int(cfg.get("test_interval", 10_000))
@@ -84,7 +135,15 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         if test_interval > 0 and t_env - last_test_t >= test_interval:
             last_test_t = t_env
             eval_logs = evaluate(envs[0], learner, num_eval, t_env, cfg)
-            logger.write(eval_logs | {"evaluation/training_steps": t_env, "t_env": t_env}, force=True)
+            logger.write(
+                eval_logs
+                | {
+                    "evaluation/training_steps": t_env,
+                    "t_env": t_env,
+                    "transfer/mode": mode,
+                },
+                force=True,
+            )
 
         for ep in collect_parallel(envs, learner, eps_at(t_env)):
             online_buffer.append(ep)
@@ -120,7 +179,9 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 t_env=t_env,
                 episode_delta=batch_size_run,
             )
-            logger.write({**logs, "t_env": t_env, "online_buffer": len(online_buffer)})
+            logger.write(
+                {**logs, "t_env": t_env, "online_buffer": len(online_buffer), "transfer/mode": mode}
+            )
 
     ckpt_dir = resolve_path(cfg.get("checkpoint_dir"))
     if ckpt_dir:
@@ -128,6 +189,11 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             ckpt_dir,
             learner,
             include_optimizer=True,
-            extra={"seed": int(cfg["seed"]), "t_env": t_env, "phase": "online"},
-            default_name=f"ovmse_paper_online_seed{cfg['seed']}.pt",
+            extra={
+                "seed": int(cfg["seed"]),
+                "t_env": t_env,
+                "phase": "online",
+                "transfer_mode": mode,
+            },
+            default_name=f"ovmse_paper_online_{mode}_seed{cfg['seed']}.pt",
         )

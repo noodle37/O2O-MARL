@@ -21,8 +21,10 @@ def get_environment(source: str, env_name: str, scenario: str, seed: int = 42) -
 
         return MPEOMAR(scenario, seed=seed)
     elif env_name == "mamujoco" and source == "og_marl":
-        from envs.mamujoco import MAMuJoCo
+        from envs.mamujoco import DiscreteMAMuJoCo, MAMuJoCo
 
+        if scenario.lower() == "2halfcheetah":
+            return DiscreteMAMuJoCo(scenario, seed=seed)
         return MAMuJoCo(scenario, seed=seed)
     elif env_name == "mamujoco" and source == "omar":
         from envs.mamujoco_omar import MAMuJoCo

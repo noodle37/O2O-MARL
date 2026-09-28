@@ -231,7 +231,7 @@ def download_and_unzip_vault(
 
     # check that the URL works
     try:
-        response = requests.get(dataset_download_url, stream=True, timeout=60)
+        response = requests.get(dataset_download_url, stream=True, timeout=(30, 600))
         response.raise_for_status()
     except Exception:
         print(

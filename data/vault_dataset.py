@@ -21,7 +21,10 @@ SMAC_EPISODE_LIMIT: Dict[str, int] = {
     "MMM": 150,
     "3s5z": 150,
     "3s5z_vs_3s6z": 170,
+    "2halfcheetah": 1000,
 }
+
+MUJOCO_DISCRETE_ACTION_SCENARIOS = frozenset({"2halfcheetah"})
 
 
 @dataclass
@@ -144,7 +147,13 @@ def load_episode_dataset_from_vault(
     n_agents = int(obs.shape[1])
     obs_dim = int(obs.shape[2])
     state_dim = int(states.shape[1])
-    n_actions = int(legals.shape[2])
+    discrete_mujoco = env_name == "mamujoco" and scenario in MUJOCO_DISCRETE_ACTION_SCENARIOS
+    if discrete_mujoco:
+        from envs.discrete_mujoco_actions import n_discrete_actions
+
+        n_actions = n_discrete_actions(scenario)
+    else:
+        n_actions = int(legals.shape[2])
 
     slices = _split_episode_slices(terminals, truncations)
     lengths = [e - s + 1 for s, e in slices]
@@ -165,9 +174,18 @@ def load_episode_dataset_from_vault(
     for i, (start, end) in enumerate(slices):
         seg_len = end - start + 1
         obs_out[i, :seg_len] = obs[start : end + 1]
-        act_out[i, :seg_len, :, 0] = actions[start : end + 1].astype(np.int64)
+        seg_actions = actions[start : end + 1]
+        if discrete_mujoco:
+            from envs.discrete_mujoco_actions import continuous_to_index
+
+            for t in range(seg_len):
+                for ag in range(n_agents):
+                    act_out[i, t, ag, 0] = continuous_to_index(seg_actions[t, ag], scenario)
+            avail_out[i, :seg_len] = 1.0
+        else:
+            act_out[i, :seg_len, :, 0] = seg_actions.astype(np.int64)
+            avail_out[i, :seg_len] = legals[start : end + 1]
         state_out[i, :seg_len] = states[start : end + 1]
-        avail_out[i, :seg_len] = legals[start : end + 1]
         team_r = rewards[start : end + 1, 0:1].mean(axis=1, keepdims=True)
         rew_out[i, :seg_len] = team_r
         term_out[i, :seg_len] = terminals[start : end + 1].max(axis=1, keepdims=True)

@@ -42,7 +42,13 @@ def main() -> None:
         online_block = cfg.get("online") or {}
         if online_block.get("t_max") is not None:
             cfg["t_max"] = online_block["t_max"]
-        if online_block.get("use_ovm") is not None:
+        transfer_block = cfg.get("transfer") or {}
+        mode = str(transfer_block.get("mode", "")).lower()
+        if mode == "ovmse":
+            cfg["system"]["use_ovm"] = True
+        elif mode:
+            cfg["system"]["use_ovm"] = False
+        elif online_block.get("use_ovm") is not None:
             cfg["system"]["use_ovm"] = online_block["use_ovm"]
         run_online(cfg)
     elif phase == "offline":

@@ -35,6 +35,35 @@ def _kendall(q_values: np.ndarray, returns: np.ndarray) -> Optional[float]:
     return float(tau)
 
 
+def _residual_sign_disagree_frac(q_values: np.ndarray, returns: np.ndarray) -> float:
+    if q_values.size == 0:
+        return 0.0
+    bias = float(np.mean(q_values - returns))
+    if abs(bias) < 1e-12:
+        return 0.0
+    sign_bias = 1.0 if bias > 0 else -1.0
+    residual = q_values - returns
+    signs = np.sign(residual)
+    signs[signs == 0] = sign_bias
+    disagree = np.mean(signs != sign_bias)
+    return float(disagree)
+
+
+def _fit_affine_calibration(q: np.ndarray, g: np.ndarray) -> tuple[float, float]:
+    """Least-squares g ≈ scale * q + shift (scalar)."""
+    if q.size < 2:
+        return 1.0, 0.0
+    qm = float(np.mean(q))
+    gm = float(np.mean(g))
+    var_q = float(np.mean((q - qm) ** 2))
+    if var_q < 1e-12:
+        return 1.0, gm - qm
+    cov = float(np.mean((q - qm) * (g - gm)))
+    scale = cov / var_q
+    shift = gm - scale * qm
+    return scale, shift
+
+
 def summarize_q_traces(
     episodes: List[Dict[str, np.ndarray]],
     gamma: float,
@@ -63,8 +92,13 @@ def summarize_q_traces(
     disagree = 0.0
     decisions = 0.0
     n_rank = 0
+    sign_disagree: List[float] = []
+    cal_train_q: List[float] = []
+    cal_train_g: List[float] = []
+    cal_hold_abs: List[float] = []
+    split = max(1, len(episodes) // 2)
 
-    for ep in episodes:
+    for ep_idx, ep in enumerate(episodes):
         q_values = np.asarray(ep["q"], dtype=np.float64)
         rewards = np.asarray(ep["reward"], dtype=np.float64)
         returns = discounted_returns(rewards, gamma)
@@ -82,6 +116,17 @@ def summarize_q_traces(
         tau = _kendall(q_values, returns)
         if tau is not None:
             taus.append(tau)
+        sign_disagree.append(_residual_sign_disagree_frac(q_values, returns))
+        if ep_idx < split:
+            cal_train_q.append(q_values)
+            cal_train_g.append(returns)
+        else:
+            if cal_train_q:
+                q_tr = np.concatenate(cal_train_q)
+                g_tr = np.concatenate(cal_train_g)
+                scale, shift = _fit_affine_calibration(q_tr, g_tr)
+                pred = scale * q_values + shift
+                cal_hold_abs.append(float(np.mean(np.abs(pred - returns))))
 
         if "offline_q" in ep:
             offline_q = np.asarray(ep["offline_q"], dtype=np.float64)
@@ -112,4 +157,8 @@ def summarize_q_traces(
         logs["evaluation/offline_q_kendall_tau"] = float(np.mean(off_taus))
     if decisions > 0:
         logs["evaluation/greedy_action_disagree_rate"] = disagree / decisions
+    if sign_disagree:
+        logs["evaluation/residual_sign_disagree_frac"] = float(np.mean(sign_disagree))
+    if cal_hold_abs:
+        logs["evaluation/calibrated_holdout_mae"] = float(np.mean(cal_hold_abs))
     return logs

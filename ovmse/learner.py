@@ -121,6 +121,7 @@ class PaperQMIXLearner(
         self.eval_last_actions: Dict[str, Optional[int]] = {}
         self.eval_offline_rnn = None
         self.eval_offline_last_actions = None
+        self.training_step_ctr = 0
 
     def _resets_from_batch(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         filled = batch["filled"]
@@ -287,6 +288,7 @@ class PaperQMIXLearner(
             loss = loss + cql_w * cql_loss
             cql_loss_val = float(cql_loss.detach().item())
 
+        self.training_step_ctr += 1
         self.optimizer.zero_grad()
         loss.backward()
         grad_norm = torch.tensor(0.0, device=self.device)
