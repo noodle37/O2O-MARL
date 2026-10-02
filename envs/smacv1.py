@@ -84,6 +84,8 @@ class SMACv1(BaseEnvironment):
             "legals": legals,
             "state": env_state,
             "battle_won": bool(smac_info.get("battle_won", False)),
+            # PyMARL2: timeout ends the episode but is not a TD terminal (bootstrap continues).
+            "episode_limit": bool(smac_info.get("episode_limit", False)),
         }
 
         return observations, rewards, terminals, truncations, info

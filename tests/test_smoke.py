@@ -37,6 +37,16 @@ def _dummy_batch(batch_size: int, seq: int, n_agents: int, obs_dim: int, state_d
     }
 
 
+from training.rollout import td_terminated_flag
+
+
+def test_td_terminated_respects_episode_limit():
+    terminal = {"agent_0": np.array(True), "agent_1": np.array(True)}
+    assert td_terminated_flag(terminal, {"episode_limit": True}) == 0.0
+    assert td_terminated_flag(terminal, {"episode_limit": False}) == 1.0
+    assert td_terminated_flag({"agent_0": np.array(False)}, {}) == 0.0
+
+
 def test_train_on_batch_and_policy():
     torch.manual_seed(0)
     n_agents, n_actions, obs_dim, state_dim = 3, 5, 8, 16

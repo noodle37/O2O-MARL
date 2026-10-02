@@ -34,7 +34,7 @@ system:
   raw_cql: false
   moderate_lambda: true
   cql_weight: 50.0
-  softmax_temp: 5
+  softmax_temp: 0.5
   num_ood_actions: 100
   max_behaviour_filled_steps: 500000
   online_cql_weight: 0.0

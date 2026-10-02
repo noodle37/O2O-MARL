@@ -13,6 +13,15 @@ import torch
 from qmix.core import QMIXBase
 
 
+def td_terminated_flag(terminal: Dict[str, np.ndarray], info: Dict[str, Any]) -> float:
+    """1.0 only for true episode termination; 0.0 on SMAC timeout (episode_limit)."""
+    if not all(terminal.values()):
+        return 0.0
+    if info.get("episode_limit", False):
+        return 0.0
+    return 1.0
+
+
 def collect_parallel(envs, learner: QMIXBase, eps: float) -> List[Dict[str, Any]]:
     n = len(envs)
     states = [learner.new_episode_state() for _ in range(n)]
@@ -47,7 +56,7 @@ def collect_parallel(envs, learner: QMIXBase, eps: float) -> List[Dict[str, Any]
                         "state": info["state"],
                         "legals": np.stack([info["legals"][a] for a in sorted(info["legals"].keys())]),
                         "reward": float(np.mean(list(rewards.values()))),
-                        "terminated": float(all(terminal.values())),
+                        "terminated": td_terminated_flag(terminal, next_info),
                     }
                 )
                 obs_info[i] = (next_obs, next_info)
@@ -74,7 +83,7 @@ def collect_episode(env, learner: QMIXBase, eps: float) -> Dict[str, Any]:
                 "state": info["state"],
                 "legals": np.stack([info["legals"][a] for a in sorted(info["legals"].keys())]),
                 "reward": float(np.mean(list(rewards.values()))),
-                "terminated": float(all(terminal.values())),
+                "terminated": td_terminated_flag(terminal, next_info),
             }
         )
         obs, info = next_obs, next_info
