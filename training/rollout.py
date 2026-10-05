@@ -42,7 +42,9 @@ def collect_parallel(envs, learner: QMIXBase, eps: float) -> List[Dict[str, Any]
                 if done[i]:
                     continue
                 obs, info = obs_info[i]
-                actions[i] = learner.select_actions_eval(obs, info["legals"], eps, states[i])
+                actions[i] = learner.select_actions_eval(
+                    obs, info["legals"], eps, states[i], env_state=info.get("state")
+                )
             results = list(pool.map(lambda i: step_one(i, actions[i]), range(n)))
             for i, result in enumerate(results):
                 if result is None:
@@ -74,7 +76,9 @@ def collect_episode(env, learner: QMIXBase, eps: float) -> Dict[str, Any]:
     steps = []
     done = False
     while not done:
-        actions = learner.select_actions_eval(obs, info["legals"], eps)
+        actions = learner.select_actions_eval(
+            obs, info["legals"], eps, env_state=info.get("state")
+        )
         next_obs, rewards, terminal, trunc, next_info = env.step(actions)
         steps.append(
             {

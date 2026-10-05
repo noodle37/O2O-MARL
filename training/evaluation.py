@@ -37,8 +37,12 @@ def evaluate(
         while not done:
             trace: Dict[str, Any] = {}
             state = info.get("state")
-            actions = learner.select_actions_eval(obs, info["legals"], eps, trace=trace)
-            if state is not None and trace.get("chosen_q"):
+            actions = learner.select_actions_eval(
+                obs, info["legals"], eps, trace=trace, env_state=state
+            )
+            if trace.get("q_tot") is not None:
+                q_steps.append(float(trace["q_tot"]))
+            elif state is not None and trace.get("chosen_q"):
                 q_steps.append(learner.mix_agent_qs(trace["chosen_q"], state))
                 if trace.get("offline_chosen_q"):
                     offline_q_steps.append(

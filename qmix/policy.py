@@ -52,7 +52,9 @@ class EvalPolicyMixin:
         eps: float,
         state: Optional[Dict[str, Any]] = None,
         trace: Optional[Dict[str, Any]] = None,
+        env_state=None,
     ) -> Dict[str, int]:
+        del env_state
         if state is None:
             rnn_state = self.eval_rnn
             last_actions = self.eval_last_actions

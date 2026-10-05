@@ -36,6 +36,9 @@ def save_qmix_checkpoint(
         "target_mixer": system.target_mixer.state_dict(),
         "training_step_ctr": int(getattr(system, "training_step_ctr", 0)),
     }
+    if getattr(system, "coord", None) is not None:
+        payload["coord"] = system.coord.state_dict()
+        payload["target_coord"] = system.target_coord.state_dict()
     if include_optimizer and hasattr(system, "optimizer"):
         payload["optimizer"] = system.optimizer.state_dict()
     if extra:

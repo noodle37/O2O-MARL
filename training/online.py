@@ -21,17 +21,27 @@ from utils.checkpoint import save_qmix_checkpoint
 from utils.paths import resolve_path
 
 
+def offline_checkpoint_names(learner_type: str, seed: Any) -> List[str]:
+    """Filenames written by this learner's own offline phase."""
+    if str(learner_type).lower() == "macal_ql":
+        stem = "macal_ql"
+    else:
+        stem = "ovmse_paper"
+    return [f"{stem}_seed{seed}_best.pt", f"{stem}_seed{seed}.pt"]
+
+
 def _resolve_offline_checkpoint(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> str:
     candidates: List[Optional[str]] = [resolve_path(offline_ckpt or cfg.get("checkpoint_path"))]
     ckpt_dir = resolve_path(cfg.get("checkpoint_dir"))
-    seed = cfg["seed"]
     if ckpt_dir:
-        candidates.append(os.path.join(ckpt_dir, f"ovmse_paper_seed{seed}_best.pt"))
-        candidates.append(os.path.join(ckpt_dir, f"ovmse_paper_seed{seed}.pt"))
+        for name in offline_checkpoint_names(str(cfg.get("learner_type", "ovmse_paper")), cfg["seed"]):
+            candidates.append(os.path.join(ckpt_dir, name))
     for path in candidates:
         if path and os.path.isfile(path):
             return path
-    raise FileNotFoundError(f"Online requires offline checkpoint, tried: {candidates}")
+    raise FileNotFoundError(
+        f"Online requires this run's offline pretraining checkpoint, tried: {candidates}"
+    )
 
 
 def _transfer_mode(cfg: Dict[str, Any]) -> str:
@@ -44,7 +54,7 @@ def _load_learner_weights(learner, payload: Dict[str, Any]) -> None:
     learner.mixer.load_state_dict(payload["mixer"])
     learner.target_q_network.load_state_dict(payload.get("target_q_network", payload["q_network"]))
     learner.target_mixer.load_state_dict(payload.get("target_mixer", payload["mixer"]))
-    if "optimizer" in payload:
+    if "optimizer" in payload and getattr(learner, "load_offline_optimizer", True):
         learner.optimizer.load_state_dict(payload["optimizer"])
     if "training_step_ctr" in payload:
         learner.training_step_ctr = int(payload["training_step_ctr"])
@@ -66,6 +76,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
 
     if mode != "scratch":
         _load_learner_weights(learner, payload)
+        if hasattr(learner, "freeze_oracle"):
+            learner.freeze_oracle()
 
     # Frozen offline nets for diagnostics (and OVM targets); always from the offline checkpoint file.
     if hasattr(learner, "load_offline_for_ovm"):
@@ -108,7 +120,11 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         perm_seed=perm_seed,
         mixer_reinit_seed=mixer_seed,
     )
-    print(f"online transfer_mode={mode} use_ovm={use_ovm} shift={shift} offline_ckpt={ckpt}")
+    print(
+        f"online learner={type(learner).__name__} transfer_mode={mode} "
+        f"use_ovm={use_ovm} mixing_ratio={float(cfg['system'].get('mixing_ratio', 0.0))} "
+        f"shift={shift} offline_ckpt={ckpt}"
+    )
 
     t_max = int(cfg["t_max"])
     test_interval = int(cfg.get("test_interval", 10_000))
@@ -135,63 +151,68 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         if test_interval > 0 and t_env - last_test_t >= test_interval:
             last_test_t = t_env
             eval_logs = evaluate(envs[0], learner, num_eval, t_env, cfg)
-            logger.write(
-                eval_logs
-                | {
-                    "evaluation/training_steps": t_env,
-                    "t_env": t_env,
-                    "transfer/mode": mode,
-                },
-                force=True,
-            )
+            eval_row = eval_logs | dict(getattr(learner, "last_diag", {}) or {}) | {
+                "evaluation/training_steps": t_env,
+                "t_env": t_env,
+                "transfer/mode": mode,
+            }
+            logger.write(eval_row, force=True)
 
         for ep in collect_parallel(envs, learner, eps_at(t_env)):
             online_buffer.append(ep)
-            t_env += ep["length"]
+            t_env += int(ep["length"])
             learner.t_env = t_env
 
-        if len(online_buffer) >= total_batch:
-            if mixing_ratio > 0:
-                offline_bs = int(round(total_batch * mixing_ratio))
-                online_bs = total_batch - offline_bs
-                if online_bs < 1:
-                    online_bs = 1
-                    offline_bs = total_batch - 1
-            else:
-                offline_bs = 0
-                online_bs = total_batch
-            picked = rng.choice(len(online_buffer), size=online_bs, replace=False)
-            online_batch = stack_episodes(
-                [online_buffer[int(i)] for i in picked],
-                offline_data.stats.max_seq_length,
-                learner.device,
+        if len(online_buffer) < total_batch:
+            continue
+
+        # One gradient step per parallel rollout.
+        episode_delta = batch_size_run
+        if mixing_ratio > 0:
+            offline_bs = int(round(total_batch * mixing_ratio))
+            online_bs = total_batch - offline_bs
+            if online_bs < 1:
+                online_bs = 1
+                offline_bs = total_batch - 1
+        else:
+            offline_bs = 0
+            online_bs = total_batch
+        picked = rng.choice(len(online_buffer), size=online_bs, replace=False)
+        online_batch = stack_episodes(
+            [online_buffer[int(i)] for i in picked],
+            offline_data.stats.max_seq_length,
+            learner.device,
+        )
+        if offline_bs > 0:
+            train_batch = merge_offline_online(
+                offline_data.sample(offline_bs, rng, device=learner.device),
+                online_batch,
+                mixing_ratio,
             )
-            if offline_bs > 0:
-                train_batch = merge_offline_online(
-                    offline_data.sample(offline_bs, rng, device=learner.device),
-                    online_batch,
-                    mixing_ratio,
-                )
-            else:
-                train_batch = online_batch
-            if isinstance(learner, MaCalQLLearner):
-                logs = learner.train_on_batch(
-                    train_batch,
-                    t_env=t_env,
-                    episode_delta=batch_size_run,
-                    eps=eps_at(t_env),
-                )
-            else:
-                logs = learner.train_on_batch(
-                    train_batch,
-                    cql_weight=online_cql,
-                    use_ovm=use_ovm,
-                    t_env=t_env,
-                    episode_delta=batch_size_run,
-                )
-            logger.write(
-                {**logs, "t_env": t_env, "online_buffer": len(online_buffer), "transfer/mode": mode}
+        else:
+            train_batch = online_batch
+        if isinstance(learner, MaCalQLLearner):
+            logs = learner.train_on_batch(
+                train_batch,
+                t_env=t_env,
+                episode_delta=episode_delta,
+                eps=eps_at(t_env),
             )
+        else:
+            logs = learner.train_on_batch(
+                train_batch,
+                cql_weight=online_cql,
+                use_ovm=use_ovm,
+                t_env=t_env,
+                episode_delta=episode_delta,
+            )
+        train_logs = {
+            **logs,
+            "t_env": t_env,
+            "online_buffer": len(online_buffer),
+            "transfer/mode": mode,
+        }
+        logger.write(train_logs)
 
     ckpt_dir = resolve_path(cfg.get("checkpoint_dir"))
     if ckpt_dir:
@@ -205,5 +226,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 "phase": "online",
                 "transfer_mode": mode,
             },
-            default_name=f"ovmse_paper_online_{mode}_seed{cfg['seed']}.pt",
+            default_name=(
+                f"{getattr(learner, 'checkpoint_stem', None) or ('macal' if isinstance(learner, MaCalQLLearner) else 'ovmse_paper')}"
+                f"_online_{mode}_seed{cfg['seed']}.pt"
+            ),
         )

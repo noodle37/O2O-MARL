@@ -48,7 +48,9 @@ def run_offline(cfg: Dict[str, Any]) -> str:
     eps_start = float(sys_cfg.get("eps_start", 1.0))
     eps_min = float(sys_cfg.get("eps_min", 0.05))
     eps_decay_steps = int(sys_cfg.get("eps_decay_steps", 0))
-    ckpt_prefix = "macal_ql" if isinstance(learner, MaCalQLLearner) else "ovmse_paper"
+    ckpt_prefix = getattr(learner, "checkpoint_stem", None) or (
+        "macal_ql" if isinstance(learner, MaCalQLLearner) else "ovmse_paper"
+    )
 
     while t_env < t_max:
         if test_interval > 0 and t_env - last_test_t >= test_interval:
