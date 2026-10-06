@@ -13,6 +13,7 @@ import torch
 
 from data.vault_dataset import print_dataset_stats
 from macal.learner import MaCalQLLearner
+from macflow.learner import MACFlowLearner
 from ovmse.transfer import apply_transfer
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
@@ -23,8 +24,11 @@ from utils.paths import resolve_path
 
 def offline_checkpoint_names(learner_type: str, seed: Any) -> List[str]:
     """Filenames written by this learner's own offline phase."""
-    if str(learner_type).lower() == "macal_ql":
+    lt = str(learner_type).lower()
+    if lt == "macal_ql":
         stem = "macal_ql"
+    elif lt == "mac_flow":
+        stem = "mac_flow"
     else:
         stem = "ovmse_paper"
     return [f"{stem}_seed{seed}_best.pt", f"{stem}_seed{seed}.pt"]
@@ -74,17 +78,25 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
     ckpt = _resolve_offline_checkpoint(cfg, offline_ckpt)
     payload = torch.load(ckpt, map_location=learner.device, weights_only=False)
 
-    if mode != "scratch":
-        _load_learner_weights(learner, payload)
-        if hasattr(learner, "freeze_oracle"):
-            learner.freeze_oracle()
+    if isinstance(learner, MACFlowLearner):
+        if "flow" in payload:
+            learner.load_state(payload)
+        if "training_step_ctr" in payload:
+            learner.training_step_ctr = int(payload["training_step_ctr"])
+        use_ovm = False
+        mode = "mac_flow"
+    else:
+        if mode != "scratch":
+            _load_learner_weights(learner, payload)
+            if hasattr(learner, "freeze_oracle"):
+                learner.freeze_oracle()
 
-    # Frozen offline nets for diagnostics (and OVM targets); always from the offline checkpoint file.
-    if hasattr(learner, "load_offline_for_ovm"):
-        learner.load_offline_for_ovm(ckpt)
+        # Frozen offline nets for diagnostics (and OVM targets); always from the offline checkpoint file.
+        if hasattr(learner, "load_offline_for_ovm"):
+            learner.load_offline_for_ovm(ckpt)
 
-    use_ovm = mode == "ovmse"
-    learner.use_ovm = use_ovm
+        use_ovm = mode == "ovmse"
+        learner.use_ovm = use_ovm
 
     batch_size_run = int(cfg.get("batch_size_run", 1))
     envs = [make_env(cfg, seed=int(cfg["seed"]) + i) for i in range(batch_size_run)]
@@ -113,19 +125,21 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             force=True,
         )
 
-    apply_transfer(
-        learner,
-        mode,
-        shift=shift,
-        perm_seed=perm_seed,
-        mixer_reinit_seed=mixer_seed,
-    )
+    if not isinstance(learner, MACFlowLearner):
+        apply_transfer(
+            learner,
+            mode,
+            shift=shift,
+            perm_seed=perm_seed,
+            mixer_reinit_seed=mixer_seed,
+        )
     print(
         f"online learner={type(learner).__name__} transfer_mode={mode} "
         f"use_ovm={use_ovm} mixing_ratio={float(cfg['system'].get('mixing_ratio', 0.0))} "
         f"shift={shift} offline_ckpt={ckpt}"
     )
 
+    count_updates = bool(cfg.get("count_updates", False))
     t_max = int(cfg["t_max"])
     test_interval = int(cfg.get("test_interval", 10_000))
     num_eval = int(cfg.get("num_eval_episodes", 32))
@@ -160,7 +174,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
 
         for ep in collect_parallel(envs, learner, eps_at(t_env)):
             online_buffer.append(ep)
-            t_env += int(ep["length"])
+            if not count_updates:
+                t_env += int(ep["length"])
             learner.t_env = t_env
 
         if len(online_buffer) < total_batch:
@@ -198,6 +213,11 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 episode_delta=episode_delta,
                 eps=eps_at(t_env),
             )
+        elif isinstance(learner, MACFlowLearner):
+            logs = learner.train_on_batch(train_batch, t_env=t_env)
+            if count_updates:
+                t_env += 1
+                learner.t_env = t_env
         else:
             logs = learner.train_on_batch(
                 train_batch,
@@ -227,7 +247,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 "transfer_mode": mode,
             },
             default_name=(
-                f"{getattr(learner, 'checkpoint_stem', None) or ('macal' if isinstance(learner, MaCalQLLearner) else 'ovmse_paper')}"
+                f"{getattr(learner, 'checkpoint_stem', None) or ('mac_flow' if isinstance(learner, MACFlowLearner) else 'macal' if isinstance(learner, MaCalQLLearner) else 'ovmse_paper')}"
                 f"_online_{mode}_seed{cfg['seed']}.pt"
             ),
         )

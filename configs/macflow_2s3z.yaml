@@ -1,0 +1,47 @@
+# MAC-Flow O2O on 2s3z.
+# Budget and eval follow OVMSE (configs/2s3z.yaml). Algorithm knobs stay MAC-Flow.
+learner_type: mac_flow
+system_name: "mac_flow 2s3z"
+seed: 1
+wandb_project: og-marl
+phase: offline
+count_updates: false
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 2
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/macflow_2s3z
+checkpoint_path: checkpoints/macflow_2s3z/mac_flow_seed1_best.pt
+log_path: checkpoints/macflow_2s3z/offline.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 2s3z
+  dataset: Medium
+  action_mode: discrete
+
+system:
+  learning_rate: 0.0003
+  discount: 0.995
+  alpha_distill: 3.0
+  flow_steps: 10
+  polyak_tau: 0.005
+  grad_norm_clip: 10.0
+  normalize_q: true
+  mixing_ratio: 0.0
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+
+online:
+  t_max: 1000000
+  test_interval: 10000
+  log_path: checkpoints/macflow_2s3z/online.jsonl
+
+transfer:
+  mode: mac_flow

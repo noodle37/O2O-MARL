@@ -10,6 +10,7 @@ import numpy as np
 
 from data.vault_dataset import print_dataset_stats
 from macal.learner import MaCalQLLearner
+from macflow.learner import MACFlowLearner
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
 from utils.checkpoint import save_qmix_checkpoint
@@ -20,7 +21,8 @@ def run_offline(cfg: Dict[str, Any]) -> str:
     dataset = load_vault_dataset(cfg)
     print_dataset_stats(dataset, label="offline")
     learner = build_learner(cfg, dataset)
-    if learner.moderate_lambda:
+    count_updates = bool(cfg.get("count_updates", False))
+    if getattr(learner, "moderate_lambda", False):
         cache = resolve_path(cfg.get("behaviour_cache_dir"))
         learner.train_behaviour(
             dataset, cache_path=cache, batch_size=int(cfg.get("batch_size", 128))
@@ -49,7 +51,11 @@ def run_offline(cfg: Dict[str, Any]) -> str:
     eps_min = float(sys_cfg.get("eps_min", 0.05))
     eps_decay_steps = int(sys_cfg.get("eps_decay_steps", 0))
     ckpt_prefix = getattr(learner, "checkpoint_stem", None) or (
-        "macal_ql" if isinstance(learner, MaCalQLLearner) else "ovmse_paper"
+        "macal_ql"
+        if isinstance(learner, MaCalQLLearner)
+        else "mac_flow"
+        if isinstance(learner, MACFlowLearner)
+        else "ovmse_paper"
     )
 
     while t_env < t_max:
@@ -85,6 +91,8 @@ def run_offline(cfg: Dict[str, Any]) -> str:
                 episode_delta=episode_delta,
                 eps=learner.linear_epsilon(t_env, eps_start, eps_min, eps_decay_steps),
             )
+        elif isinstance(learner, MACFlowLearner):
+            logs = learner.train_on_batch(batch, t_env=t_env)
         else:
             logs = learner.train_on_batch(
                 batch,
@@ -93,7 +101,7 @@ def run_offline(cfg: Dict[str, Any]) -> str:
                 t_env=t_env,
                 episode_delta=episode_delta,
             )
-        t_env += filled
+        t_env += 1 if count_updates else filled
         learner.t_env = t_env
         n_updates += 1
         if n_updates % 50 == 0:

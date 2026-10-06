@@ -10,6 +10,7 @@ from data.vault_dataset import EpisodeDataset, load_episode_dataset_from_vault
 from data.vault_download import download_and_unzip_vault
 from envs import get_environment
 from macal.learner import MaCalQLLearner
+from macflow.learner import MACFlowLearner
 from ovmse.learner import PaperQMIXLearner
 from qmix.core import QMIXBase
 from uot.learner import UOTLearner
@@ -87,6 +88,26 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             eps_min=float(sys_cfg.get("eps_min", 0.05)),
             device=str(sys_cfg.get("device", "cuda")),
         )
+    if learner_type == "mac_flow":
+        action_mode = str((cfg.get("task") or {}).get("action_mode", "discrete")).lower()
+        continuous = action_mode == "continuous" or s.action_continuous
+        act_dim = s.act_dim if continuous else s.n_actions
+        return MACFlowLearner(
+            n_agents=s.n_agents,
+            obs_dim=s.obs_dim,
+            n_actions=s.n_actions if not continuous else 0,
+            act_dim=act_dim,
+            action_mode="continuous" if continuous else "discrete",
+            learning_rate=float(sys_cfg.get("learning_rate", 3e-4)),
+            gamma=float(sys_cfg.get("discount", 0.995)),
+            alpha_distill=float(sys_cfg.get("alpha_distill", 3.0)),
+            flow_steps=int(sys_cfg.get("flow_steps", 10)),
+            polyak_tau=float(sys_cfg.get("polyak_tau", 0.005)),
+            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 10.0)),
+            normalize_q=bool(sys_cfg.get("normalize_q", True)),
+            device=str(sys_cfg.get("device", "cuda")),
+            batch_size_run=int(cfg.get("batch_size_run", 1)),
+        )
     if learner_type == "macal_ql":
         return MaCalQLLearner(
             n_agents=s.n_agents,
@@ -126,12 +147,18 @@ def load_vault_dataset(cfg: Dict[str, Any]) -> EpisodeDataset:
         str(task["dataset"]),
         rel_dir=str(VAULT_DIR),
         device=str(cfg["system"].get("data_device", cfg["system"].get("device", "cuda"))),
+        action_mode=str(task.get("action_mode", "discrete")),
     )
 
 
 def make_env(cfg: Dict[str, Any], seed: int):
+    task = cfg["task"]
     return get_environment(
-        cfg["task"]["source"], cfg["task"]["env"], cfg["task"]["scenario"], seed=seed
+        task["source"],
+        task["env"],
+        task["scenario"],
+        seed=seed,
+        action_mode=str(task.get("action_mode", "discrete")),
     )
 
 

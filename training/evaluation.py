@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from qmix.core import QMIXBase
+from training.rollout_helpers import legals_from_info
 from training.q_metrics import summarize_q_traces
 
 
@@ -37,8 +38,13 @@ def evaluate(
         while not done:
             trace: Dict[str, Any] = {}
             state = info.get("state")
+            agents = sorted(obs.keys())
             actions = learner.select_actions_eval(
-                obs, info["legals"], eps, trace=trace, env_state=state
+                obs,
+                legals_from_info(info, agents),
+                eps,
+                trace=trace,
+                env_state=state,
             )
             if trace.get("q_tot") is not None:
                 q_steps.append(float(trace["q_tot"]))

@@ -1,0 +1,41 @@
+# MAC-Flow offline on MA-MuJoCo 2halfcheetah (continuous actions).
+learner_type: mac_flow
+system_name: "mac_flow 2halfcheetah"
+seed: 1
+wandb_project: og-marl
+phase: offline
+count_updates: true
+t_max: 500000
+batch_size: 64
+batch_size_run: 2
+test_interval: 50000
+num_eval_episodes: 10
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/macflow_2halfcheetah
+checkpoint_path: checkpoints/macflow_2halfcheetah/mac_flow_seed1_best.pt
+log_path: checkpoints/macflow_2halfcheetah/offline.jsonl
+
+task:
+  source: og_marl
+  env: mamujoco
+  scenario: 2halfcheetah
+  dataset: Good
+  action_mode: continuous
+
+system:
+  learning_rate: 0.0003
+  discount: 0.995
+  alpha_distill: 3.0
+  flow_steps: 10
+  polyak_tau: 0.005
+  grad_norm_clip: 10.0
+  normalize_q: true
+  device: cuda
+
+online:
+  t_max: 500000
+  test_interval: 50000
+  log_path: checkpoints/macflow_2halfcheetah/online.jsonl
+
+transfer:
+  mode: mac_flow

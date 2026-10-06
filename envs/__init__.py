@@ -3,7 +3,13 @@
 from envs.base import BaseEnvironment
 
 
-def get_environment(source: str, env_name: str, scenario: str, seed: int = 42) -> BaseEnvironment:  # noqa: C901
+def get_environment(
+    source: str,
+    env_name: str,
+    scenario: str,
+    seed: int = 42,
+    action_mode: str = "discrete",
+) -> BaseEnvironment:  # noqa: C901
     if env_name == "smac_v1" and source != "omiga":
         from envs.smacv1 import SMACv1
 
@@ -23,7 +29,7 @@ def get_environment(source: str, env_name: str, scenario: str, seed: int = 42) -
     elif env_name == "mamujoco" and source == "og_marl":
         from envs.mamujoco import DiscreteMAMuJoCo, MAMuJoCo
 
-        if scenario.lower() == "2halfcheetah":
+        if scenario.lower() == "2halfcheetah" and str(action_mode).lower() != "continuous":
             return DiscreteMAMuJoCo(scenario, seed=seed)
         return MAMuJoCo(scenario, seed=seed)
     elif env_name == "mamujoco" and source == "omar":

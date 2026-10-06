@@ -37,6 +37,8 @@ class EpisodeDatasetStats:
     obs_dim: int
     state_dim: int
     n_actions: int
+    act_dim: int = 1
+    action_continuous: bool = False
 
 
 class EpisodeDataset:
@@ -127,6 +129,7 @@ def load_episode_dataset_from_vault(
     rel_dir: str | None = None,
     device: str = "cuda",
     episode_limit: Optional[int] = None,
+    action_mode: str = "discrete",
 ) -> EpisodeDataset:
     import jax
 
@@ -157,13 +160,23 @@ def load_episode_dataset_from_vault(
     n_agents = int(obs.shape[1])
     obs_dim = int(obs.shape[2])
     state_dim = int(states.shape[1])
-    discrete_mujoco = env_name == "mamujoco" and scenario in MUJOCO_DISCRETE_ACTION_SCENARIOS
+    continuous = str(action_mode).lower() == "continuous"
+    discrete_mujoco = (
+        not continuous
+        and env_name == "mamujoco"
+        and scenario in MUJOCO_DISCRETE_ACTION_SCENARIOS
+    )
     if discrete_mujoco:
         from envs.discrete_mujoco_actions import n_discrete_actions
 
         n_actions = n_discrete_actions(scenario)
+        act_dim = 1
+    elif continuous:
+        act_dim = int(np.asarray(actions[0, 0]).reshape(-1).shape[0])
+        n_actions = act_dim
     else:
         n_actions = int(legals.shape[2])
+        act_dim = 1
 
     slices = _split_episode_slices(terminals, truncations)
     lengths = [e - s + 1 for s, e in slices]
@@ -174,7 +187,10 @@ def load_episode_dataset_from_vault(
 
     n_ep = len(slices)
     obs_out = np.zeros((n_ep, max_seq, n_agents, obs_dim), dtype=np.float32)
-    act_out = np.zeros((n_ep, max_seq, n_agents, 1), dtype=np.int64)
+    if continuous:
+        act_out = np.zeros((n_ep, max_seq, n_agents, act_dim), dtype=np.float32)
+    else:
+        act_out = np.zeros((n_ep, max_seq, n_agents, 1), dtype=np.int64)
     state_out = np.zeros((n_ep, max_seq, state_dim), dtype=np.float32)
     avail_out = np.zeros((n_ep, max_seq, n_agents, n_actions), dtype=np.float32)
     rew_out = np.zeros((n_ep, max_seq, 1), dtype=np.float32)
@@ -185,7 +201,10 @@ def load_episode_dataset_from_vault(
         seg_len = end - start + 1
         obs_out[i, :seg_len] = obs[start : end + 1]
         seg_actions = actions[start : end + 1]
-        if discrete_mujoco:
+        if continuous:
+            act_out[i, :seg_len] = seg_actions.astype(np.float32)
+            avail_out[i, :seg_len] = 1.0
+        elif discrete_mujoco:
             from envs.discrete_mujoco_actions import continuous_to_index
 
             for t in range(seg_len):
@@ -228,6 +247,8 @@ def load_episode_dataset_from_vault(
             obs_dim=obs_dim,
             state_dim=state_dim,
             n_actions=n_actions,
+            act_dim=act_dim,
+            action_continuous=continuous,
         ),
     )
     return dataset
@@ -239,5 +260,6 @@ def print_dataset_stats(dataset: EpisodeDataset, label: str = "") -> None:
     print(
         f"{prefix}episodes={s.n_episodes} max_seq={s.max_seq_length} "
         f"total_filled={s.total_filled_steps} median_len={s.median_episode_length:.1f} "
-        f"agents={s.n_agents} obs={s.obs_dim} state={s.state_dim} actions={s.n_actions}"
+        f"agents={s.n_agents} obs={s.obs_dim} state={s.state_dim} actions={s.n_actions} "
+        f"act_dim={s.act_dim} continuous={s.action_continuous}"
     )
