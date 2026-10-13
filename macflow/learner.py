@@ -1,21 +1,25 @@
-"""MAC-Flow learner: joint flow BC + VDN twin-Q + one-step distillation."""
+"""MAC-Flow learner: per-agent flow matching on one-hot actions.
+
+Mirrors the original repo's `agents/discrete_macflow.py`:
+- per-agent factorized flow over one-hot actions; obs prepended with agent-id one-hot
+- one-step policy distilled (CE) against the Euler flow's argmax (hard labels)
+- critic TD mixed by summing per-agent twin-mean Q (VDN), loss = 0.5 * MSE
+- Q-guidance term uses the argmax one-hot (gradient reaches the critic only)
+- single Adam optimizer (eps=1e-8), Polyak target update after each step
+- deployment: z=0, legal-masked greedy argmax
+"""
 
 from __future__ import annotations
 
-import copy
-from typing import Any, Dict, List, Optional, Union
+from itertools import chain
+from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from macflow.flow import (
-    euler_integrate,
-    flow_bc_loss,
-    obs_joint_from_batch,
-    split_joint_to_agents,
-)
-from macflow.networks import JointFlowField, OneStepPolicy, TwinQCritic, vdn_tot
+from macflow.flow import euler_integrate, flow_bc_loss
+from macflow.networks import FlowField, OneStepPolicy, TwinQ, add_agent_id, mix_mean
 
 
 class MACFlowLearner:
@@ -32,57 +36,76 @@ class MACFlowLearner:
         act_dim: int = 0,
         action_mode: str = "discrete",
         learning_rate: float = 3e-4,
-        gamma: float = 0.995,
+        gamma: float = 0.99,
         alpha_distill: float = 3.0,
         flow_steps: int = 10,
         polyak_tau: float = 0.005,
-        grad_norm_clip: float = 10.0,
-        normalize_q: bool = True,
+        grad_norm_clip: float = 0.0,
+        normalize_q: bool = False,
         device: str = "cuda",
         batch_size_run: int = 1,
+        sequence_length: int = 20,
+        hidden_dims: Sequence[int] = (256, 256, 256, 256),
+        actor_layer_norm: bool = False,
+        t_embed_frequencies: int = 8,
+        adam_eps: float = 1e-8,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.n_agents = n_agents
-        self.obs_dim = obs_dim
+        self.n_agents = int(n_agents)
+        self.obs_dim = int(obs_dim)
         self.action_mode = str(action_mode).lower()
         self.continuous = self.action_mode == "continuous"
         self.per_agent_dim = int(act_dim if self.continuous else n_actions)
         self.n_actions = int(n_actions) if not self.continuous else int(act_dim)
-        self.joint_dim = n_agents * self.per_agent_dim
-        self.gamma = gamma
-        self.alpha_distill = alpha_distill
-        self.flow_steps = flow_steps
-        self.polyak_tau = polyak_tau
-        self.grad_norm_clip = grad_norm_clip
-        self.normalize_q = normalize_q
-        self.batch_size_run = batch_size_run
+        self.pair_dim = self.n_agents + self.obs_dim
+        self.gamma = float(gamma)
+        self.alpha_distill = float(alpha_distill)
+        self.flow_steps = int(flow_steps)
+        self.polyak_tau = float(polyak_tau)
+        self.grad_norm_clip = float(grad_norm_clip)
+        self.normalize_q = bool(normalize_q)
+        self.batch_size_run = int(batch_size_run)
+        self.sequence_length = int(sequence_length)
         self.t_env = 0
         self.training_step_ctr = 0
         self.last_diag: Dict[str, float] = {}
-        self._eval_noise: Optional[Dict[str, np.ndarray]] = None
 
-        obs_joint_dim = n_agents * obs_dim
-        self.flow = JointFlowField(obs_joint_dim, self.joint_dim).to(self.device)
-        self.critic = TwinQCritic(obs_dim, self.per_agent_dim, n_agents).to(self.device)
-        self.target_critic = copy.deepcopy(self.critic).to(self.device)
+        hidden = [int(h) for h in hidden_dims]
+        self.flow = FlowField(
+            self.pair_dim,
+            self.per_agent_dim,
+            hidden,
+            layer_norm=actor_layer_norm,
+            t_freqs=t_embed_frequencies,
+        ).to(self.device)
+        self.policy = OneStepPolicy(
+            self.pair_dim,
+            self.per_agent_dim,
+            self.per_agent_dim,
+            hidden,
+            layer_norm=actor_layer_norm,
+        ).to(self.device)
+        self.critic = TwinQ(self.pair_dim, self.per_agent_dim, hidden, layer_norm=True).to(
+            self.device
+        )
+        self.target_critic = type(self.critic)(
+            self.pair_dim, self.per_agent_dim, hidden, layer_norm=True
+        ).to(self.device)
+        self.target_critic.load_state_dict(self.critic.state_dict())
         for p in self.target_critic.parameters():
             p.requires_grad_(False)
-        self.policy = OneStepPolicy(
-            obs_dim,
-            self.per_agent_dim,
-            self.per_agent_dim,
-            n_agents,
-            continuous=self.continuous,
-        ).to(self.device)
 
-        self.flow_opt = torch.optim.Adam(self.flow.parameters(), lr=learning_rate, eps=1e-5)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=learning_rate, eps=1e-5)
-        self.policy_opt = torch.optim.Adam(self.policy.parameters(), lr=learning_rate, eps=1e-5)
+        self.optimizer = torch.optim.Adam(
+            chain(self.flow.parameters(), self.critic.parameters(), self.policy.parameters()),
+            lr=learning_rate,
+            eps=adam_eps,
+        )
 
         print(
-            f"MAC-Flow mode={self.action_mode} agents={n_agents} "
-            f"per_dim={self.per_agent_dim} joint={self.joint_dim} "
-            f"flow_steps={flow_steps} alpha={alpha_distill}"
+            f"MAC-Flow mode={self.action_mode} agents={n_agents} obs={obs_dim} "
+            f"pair={self.pair_dim} per_dim={self.per_agent_dim} seq={sequence_length} "
+            f"hidden={hidden} flow_steps={flow_steps} alpha={alpha_distill} "
+            f"gamma={gamma} normalize_q={normalize_q}"
         )
 
     @staticmethod
@@ -95,75 +118,37 @@ class MACFlowLearner:
         return {}
 
     def reset_eval_hidden(self) -> None:
-        self._eval_noise = None
+        return None
 
-    def _velocity_fn(self, t: torch.Tensor, obs_joint: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        return self.flow(t, obs_joint, x)
-
-    def _actions_for_critic(self, actions_idx_or_vec: torch.Tensor) -> torch.Tensor:
-        """[B,N,1] int or [B,N,D] float -> [B,N,per_dim]."""
-        if self.continuous:
-            return actions_idx_or_vec.float()
-        idx = actions_idx_or_vec[..., 0].long().clamp(0, self.per_agent_dim - 1)
-        return F.one_hot(idx, self.per_agent_dim).float()
-
-    def _flow_sample_joint(
-        self, obs_joint: torch.Tensor, z: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        b = obs_joint.shape[0]
-        if z is None:
-            z = torch.randn(b, self.joint_dim, device=self.device, dtype=obs_joint.dtype)
-        return euler_integrate(self._velocity_fn, obs_joint, z, self.flow_steps)
-
-    def _policy_actions(
-        self, obs: torch.Tensor, noise: torch.Tensor
-    ) -> torch.Tensor:
-        return self.policy(obs, noise)
-
-    def _distill_target(
-        self, obs: torch.Tensor, noise: torch.Tensor
-    ) -> torch.Tensor:
-        """Euler slice per agent [B,N,per_dim]. Detached so only Eq. 6 trains the flow."""
-        obs_j = obs_joint_from_batch(obs)
-        joint = self._flow_sample_joint(obs_j, noise.reshape(obs.shape[0], self.joint_dim))
-        per_agent = split_joint_to_agents(joint, self.n_agents, self.per_agent_dim)
-        if self.continuous:
-            per_agent = torch.tanh(per_agent)
-        return per_agent.detach()
-
-    def _gather_transitions(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def _window_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Sample a [B, W] window of consecutive steps per episode (repo sequence sampling)."""
         obs = batch["obs"]
-        actions = batch["actions"]
-        avail = batch.get("avail_actions")
-        reward = batch["reward"]
-        term = batch["terminated"]
-        filled = batch["filled"]
+        b, s = obs.shape[0], obs.shape[1]
+        if s < 2:
+            raise ValueError("MAC-Flow batch has no transitions")
+        w = min(self.sequence_length, s)
+        filled = batch["filled"][..., 0]
+        lengths = filled.sum(dim=1)
+        max_start = (lengths - w).clamp(min=0).long()
+        u = torch.rand(b, device=obs.device) * (max_start + 1).float()
+        starts = u.floor().long().clamp_(max=max_start)
+        idx = starts[:, None] + torch.arange(w, device=obs.device)[None, :]
+        rows = torch.arange(b, device=obs.device)[:, None]
 
-        # filled[t] is the transition; the following index holds the next obs,
-        # including the bootstrap slot whose filled flag is 0.
-        valid = filled[:, :-1, 0] > 0.5
-        b_idx, t_idx = torch.where(valid)
-        if b_idx.numel() == 0:
-            raise ValueError("MAC-Flow batch has no valid transitions")
+        def take(x: torch.Tensor) -> torch.Tensor:
+            return x[rows, idx]
 
-        obs_t = obs[b_idx, t_idx]
-        obs_tp1 = obs[b_idx, t_idx + 1]
-        act_t = actions[b_idx, t_idx]
-        r = reward[b_idx, t_idx, 0]
-        done = term[b_idx, t_idx, 0].clamp(0, 1)
-        avail_t = avail[b_idx, t_idx] if avail is not None else None
-        avail_tp1 = avail[b_idx, t_idx + 1] if avail is not None else None
-        return {
-            "obs_t": obs_t,
-            "obs_tp1": obs_tp1,
-            "act_t": act_t,
-            "reward": r,
-            "done": done,
-            "avail_t": avail_t,
-            "avail_tp1": avail_tp1,
-            "b_idx": b_idx,
-            "t_idx": t_idx,
+        window = {
+            "obs": take(obs),
+            "actions": take(batch["actions"]),
+            "filled": take(filled),
+            "terminated": take(batch["terminated"][..., 0]),
+            "reward": take(batch["reward"][..., 0]),
         }
+        avail = batch.get("avail_actions")
+        if avail is not None:
+            window["avail"] = take(avail)
+        return window
 
     def train_on_batch(
         self,
@@ -176,79 +161,87 @@ class MACFlowLearner:
         eps: Optional[float] = None,
     ) -> Dict[str, float]:
         del cql_weight, use_ovm, eps, episode_delta
-        tr = self._gather_transitions(batch)
-        obs_t = tr["obs_t"]
-        obs_tp1 = tr["obs_tp1"]
-        act_t = tr["act_t"]
-        r = tr["reward"]
-        done = tr["done"]
+        if t_env is not None:
+            self.t_env = int(t_env)
 
-        obs_j_t = obs_joint_from_batch(obs_t).detach()
-        obs_j_tp1 = obs_joint_from_batch(obs_tp1).detach()
-        bsz = act_t.shape[0]
+        wb = self._window_batch(batch)
+        b, w, n = wb["obs"].shape[0], wb["obs"].shape[1], wb["obs"].shape[2]
+        pair = add_agent_id(wb["obs"])
+        device = pair.device
+
+        # Actor-side losses use window steps 0..W-2 (repo `observations[:-1]`).
+        pair_f = pair[:, :-1].reshape(-1, self.pair_dim)
+        mask_t = wb["filled"][:, :-1] > 0.5
+        mask = mask_t[:, :, None].expand(-1, -1, n).reshape(-1)
+        mask_f = mask.float()
+        denom = mask_f.sum().clamp(min=1.0)
+
         if self.continuous:
-            x1 = act_t.reshape(bsz, self.joint_dim)
+            x1 = wb["actions"][:, :-1].float().reshape(-1, self.per_agent_dim)
         else:
-            idx = act_t[..., 0].long().clamp(0, self.per_agent_dim - 1)
-            x1 = F.one_hot(idx, self.per_agent_dim).float().reshape(bsz, self.joint_dim)
+            idx_a = wb["actions"][:, :-1, :, 0].long().clamp(0, self.per_agent_dim - 1)
+            x1 = F.one_hot(idx_a, self.per_agent_dim).float().reshape(-1, self.per_agent_dim)
 
-        # --- Flow BC ---
-        def vfn(t, oj, x):
-            return self._velocity_fn(t, oj, x)
+        # --- Flow BC (Eq. 6) ---
+        loss_flow = flow_bc_loss(self.flow, pair_f, x1, mask=mask_f)
 
-        loss_flow = flow_bc_loss(vfn, obs_j_t, x1)
-
-        self.flow_opt.zero_grad()
-        loss_flow.backward()
-        if self.grad_norm_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.flow.parameters(), self.grad_norm_clip)
-        self.flow_opt.step()
-
-        # --- Per-agent critic TD; next action is the Euler vector itself ---
+        # --- Critic TD: next action from the one-step policy with fresh z (repo) ---
+        pair_next = pair[:, 1:].reshape(-1, self.pair_dim)
+        z_next = torch.randn(x1.shape, device=device)
         with torch.no_grad():
-            z_next = torch.randn(obs_tp1.shape[0], self.joint_dim, device=self.device)
-            joint_next = self._flow_sample_joint(obs_j_tp1, z_next)
-            a_next = split_joint_to_agents(joint_next, self.n_agents, self.per_agent_dim)
+            pol_next = self.policy(pair_next, z_next)
             if self.continuous:
-                a_next = torch.tanh(a_next)
-            q_next = self.target_critic(obs_tp1, a_next)
-            target = r.view(-1, 1, 1) + self.gamma * (1.0 - done.view(-1, 1, 1)) * q_next
+                a_next = pol_next.clamp(-1.0, 1.0)
+            else:
+                a_next = F.one_hot(pol_next.argmax(dim=-1), self.per_agent_dim).float()
+            q_next = self.target_critic(pair_next, a_next).reshape(b, w - 1, n)
+            r = wb["reward"][:, :-1]
+            done = (wb["terminated"][:, 1:] > 0.5).float()
+            target = r.unsqueeze(-1) + self.gamma * (1.0 - done).unsqueeze(-1) * q_next
+            mixed_target = target.sum(dim=-1)
 
-        a_t = self._actions_for_critic(act_t)
-        q = self.critic(obs_t, a_t)
-        q_tot = vdn_tot(q)
-        td_loss = F.mse_loss(q, target)
+        q_cur = self.critic(pair_f, x1).reshape(b, w - 1, n)
+        mixed_q = q_cur.sum(dim=-1)
+        td_err = (mixed_q - mixed_target) ** 2
+        mask_t_f = mask_t.float()
+        td_loss = 0.5 * (td_err * mask_t_f).sum() / mask_t_f.sum().clamp(min=1.0)
 
-        self.critic_opt.zero_grad()
-        td_loss.backward()
-        if self.grad_norm_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.grad_norm_clip)
-        self.critic_opt.step()
+        # --- One-step policy distillation (Eq. 9) with fresh z ---
+        z_dist = torch.randn(x1.shape, device=device)
+        logits = self.policy(pair_f, z_dist)
+        with torch.no_grad():
+            endpoint = euler_integrate(self.flow, pair_f, z_dist, self.flow_steps)
+            teacher = endpoint.clamp(-1.0, 1.0) if self.continuous else endpoint.argmax(dim=-1)
+        if self.continuous:
+            distill_rows = ((logits - teacher) ** 2).mean(dim=-1)
+        else:
+            distill_rows = F.cross_entropy(logits, teacher, reduction="none")
+        distill_loss = (distill_rows * mask_f).sum() / denom
 
-        # --- Actor: -Q + alpha * distill ---
-        z_pol = torch.randn(obs_t.shape[0], self.joint_dim, device=self.device)
-        noise_agents = split_joint_to_agents(z_pol, self.n_agents, self.per_agent_dim)
-        # Policy output lives in the same vector space as the Euler slice.
-        # Discrete deployment argmax stays in select_actions_eval.
-        pol_out = self._policy_actions(obs_t, noise_agents)
-        teacher = self._distill_target(obs_t, z_pol)
-        distill = F.mse_loss(pol_out, teacher)
-        a_for_q = pol_out
-
-        q_pol = self.critic(obs_t, a_for_q)
-        q_pol_tot = vdn_tot(q_pol)
-        q_term = -q_pol_tot.mean()
+        # --- Q-guidance: repo's argmax one-hot term; gradient reaches the critic ---
+        if self.continuous:
+            q_guid = self.critic(pair_f, logits.clamp(-1.0, 1.0)).reshape(b, w - 1, n)
+        else:
+            with torch.no_grad():
+                onehot = F.one_hot(logits.argmax(dim=-1), self.per_agent_dim).float()
+            q_guid = self.critic(pair_f, onehot).reshape(b, w - 1, n)
+        q_guid = q_guid.mean(dim=-1)
+        q_guid = (q_guid * mask_t_f).sum() / mask_t_f.sum().clamp(min=1.0)
+        q_loss = -q_guid
         if self.normalize_q:
-            scale = q_pol_tot.detach().abs().mean().clamp(min=1e-6)
-            q_term = q_term / scale
+            q_loss = q_loss / q_guid.detach().abs().clamp(min=1e-6)
 
-        actor_loss = q_term + self.alpha_distill * distill
+        actor_loss = loss_flow + self.alpha_distill * distill_loss + q_loss
+        loss = td_loss + actor_loss
 
-        self.policy_opt.zero_grad()
-        actor_loss.backward()
+        self.optimizer.zero_grad()
+        loss.backward()
         if self.grad_norm_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.grad_norm_clip)
-        self.policy_opt.step()
+            torch.nn.utils.clip_grad_norm_(
+                chain(self.flow.parameters(), self.critic.parameters(), self.policy.parameters()),
+                self.grad_norm_clip,
+            )
+        self.optimizer.step()
 
         with torch.no_grad():
             for tp, p in zip(self.target_critic.parameters(), self.critic.parameters()):
@@ -256,12 +249,15 @@ class MACFlowLearner:
 
         self.training_step_ctr += 1
         logs = {
-            "loss": float((loss_flow + td_loss + actor_loss).detach().item()),
+            "loss": float(loss.detach().item()),
             "loss_flow": float(loss_flow.detach().item()),
             "td_loss": float(td_loss.detach().item()),
             "actor_loss": float(actor_loss.detach().item()),
-            "distill_loss": float(distill.detach().item()),
-            "q_tot_mean": float(q_tot.detach().mean().item()),
+            "distill_loss": float(distill_loss.detach().item()),
+            "q_loss": float(q_loss.detach().item()),
+            "q_tot_mean": float(
+                ((mixed_q.detach() * mask_t.float()).sum() / mask_t.float().sum().clamp(min=1.0)).item()
+            ),
         }
         self.last_diag = logs
         return logs
@@ -272,15 +268,13 @@ class MACFlowLearner:
             "critic": self.critic.state_dict(),
             "target_critic": self.target_critic.state_dict(),
             "policy": self.policy.state_dict(),
-            "flow_opt": self.flow_opt.state_dict(),
-            "critic_opt": self.critic_opt.state_dict(),
-            "policy_opt": self.policy_opt.state_dict(),
             "meta": {
                 "n_agents": self.n_agents,
                 "obs_dim": self.obs_dim,
+                "pair_dim": self.pair_dim,
                 "per_agent_dim": self.per_agent_dim,
                 "action_mode": self.action_mode,
-                "joint_dim": self.joint_dim,
+                "sequence_length": self.sequence_length,
             },
         }
 
@@ -289,12 +283,10 @@ class MACFlowLearner:
         self.critic.load_state_dict(payload["critic"])
         self.target_critic.load_state_dict(payload.get("target_critic", payload["critic"]))
         self.policy.load_state_dict(payload["policy"])
-        if "flow_opt" in payload:
-            self.flow_opt.load_state_dict(payload["flow_opt"])
-        if "critic_opt" in payload:
-            self.critic_opt.load_state_dict(payload["critic_opt"])
-        if "policy_opt" in payload:
-            self.policy_opt.load_state_dict(payload["policy_opt"])
+        if "optimizer" in payload and self.load_offline_optimizer:
+            self.optimizer.load_state_dict(payload["optimizer"])
+        if "training_step_ctr" in payload:
+            self.training_step_ctr = int(payload["training_step_ctr"])
 
     def select_actions_eval(
         self,
@@ -303,44 +295,44 @@ class MACFlowLearner:
         eps: float,
         state: Optional[Dict[str, Any]] = None,
         trace: Optional[Dict[str, Any]] = None,
-        env_state=None,
+        env_state: Any = None,
     ) -> Dict[str, Union[int, np.ndarray]]:
         del state, env_state
         agents = sorted(observations.keys())
-        obs_list = [observations[a].astype(np.float32) for a in agents]
-        obs = torch.tensor(np.stack(obs_list), device=self.device).unsqueeze(0)
-        if self.continuous:
-            if eps > 0:
-                noise = torch.randn(1, self.n_agents, self.per_agent_dim, device=self.device)
-            else:
-                noise = torch.zeros(1, self.n_agents, self.per_agent_dim, device=self.device)
-            act = self.policy(obs, noise)[0].cpu().numpy()
-            out = {a: act[i].astype(np.float32) for i, a in enumerate(agents)}
+        obs = torch.tensor(
+            np.stack([observations[a].astype(np.float32) for a in agents]),
+            device=self.device,
+        ).unsqueeze(0)
+        pair = add_agent_id(obs)
+        if eps > 0:
+            z = torch.randn(1, self.n_agents, self.per_agent_dim, device=self.device)
         else:
-            if eps > 0:
-                z = torch.randn(1, self.joint_dim, device=self.device)
-                noise_ag = split_joint_to_agents(z, self.n_agents, self.per_agent_dim)
-            else:
-                noise_ag = torch.zeros(1, self.n_agents, self.per_agent_dim, device=self.device)
-            logits = self.policy(obs, noise_ag)
+            z = torch.zeros(1, self.n_agents, self.per_agent_dim, device=self.device)
+        with torch.no_grad():
+            out = self.policy(pair, z)[0]
+        if self.continuous:
+            chosen = out.clamp(-1.0, 1.0)
+            act = chosen.cpu().numpy()
+            actions = {a: act[i].astype(np.float32) for i, a in enumerate(agents)}
+            a_c = chosen.reshape(1, self.n_agents, self.per_agent_dim)
+        else:
+            logits = out
             if legals is not None:
-                avail = np.stack([legals[a] for a in agents])
-                avail_t = torch.tensor(avail, device=self.device, dtype=torch.bool).unsqueeze(0)
-                logits = logits.masked_fill(~avail_t, -1e9)
-            idx = logits.argmax(dim=-1).reshape(-1).cpu().numpy()
+                avail = torch.tensor(
+                    np.stack([legals[a] for a in agents]),
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+                logits = logits.masked_fill(~avail, -1e9)
+            idx = logits.argmax(dim=-1).reshape(-1)
             if eps > 0:
                 for i, a in enumerate(agents):
                     if np.random.rand() < eps / self.n_agents:
                         legal = np.flatnonzero(legals[a]) if legals else np.arange(self.per_agent_dim)
                         idx[i] = int(np.random.choice(legal))
-            out = {a: int(idx[i]) for i, a in enumerate(agents)}
+            actions = {a: int(idx[i]) for i, a in enumerate(agents)}
+            a_c = F.one_hot(idx, self.per_agent_dim).float().reshape(1, self.n_agents, self.per_agent_dim)
         if trace is not None:
             with torch.no_grad():
-                if self.continuous:
-                    a_c = act.reshape(1, self.n_agents, self.per_agent_dim)
-                else:
-                    a_c = self._actions_for_critic(
-                        torch.tensor(idx, device=self.device).reshape(1, self.n_agents, 1)
-                    )
-                trace["q_tot"] = float(vdn_tot(self.critic(obs, a_c)).item())
-        return out
+                trace["q_tot"] = float(mix_mean(self.critic(pair, a_c)).item())
+        return actions

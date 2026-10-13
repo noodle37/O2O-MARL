@@ -139,6 +139,12 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         f"shift={shift} offline_ckpt={ckpt}"
     )
 
+    if isinstance(learner, MACFlowLearner):
+        from macflow.online_runner import run_macflow_online
+
+        run_macflow_online(cfg, learner, envs[0], logger)
+        return
+
     count_updates = bool(cfg.get("count_updates", False))
     t_max = int(cfg["t_max"])
     test_interval = int(cfg.get("test_interval", 10_000))

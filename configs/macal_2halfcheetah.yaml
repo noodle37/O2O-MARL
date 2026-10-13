@@ -1,0 +1,70 @@
+# MaCal-QL — Cal-QL calibrated conservatism on joint Q_tot (2halfcheetah, Good).
+# Discrete 27-way torque bins per agent (envs/discrete_mujoco_actions.py).
+#
+# Budget scaling mirrors configs/2halfcheetah.yaml: one batch of 128 episodes
+# carries 128,000 filled steps (episodes are the full 1000-step limit) versus
+# 3,463 on 5m_vs_6m, so the env-step and episode constants are rescaled to give
+# the same 3,000 gradient updates, 30 evaluations and 25-step target cadence.
+#
+# Measured on this map (Good, 1000 eps, batch 128): 1.0 s/update, 6 GiB peak.
+# Reward is 6.92/step, so Q_tot and the Cal-QL anchor G_t are O(600) rather than
+# the O(1) win-rate scale of SMAC; mc_return_mean measured 640-646.
+learner_type: macal_ql
+system_name: "macal_ql 2halfcheetah"
+seed: 1
+wandb_project: og-marl
+phase: offline
+t_max: 384000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 2
+test_interval: 12800000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/macal_2halfcheetah_offline
+checkpoint_path: checkpoints/macal_2halfcheetah_offline/macal_ql_seed1_best.pt
+log_path: checkpoints/macal_2halfcheetah_offline/offline.jsonl
+
+task:
+  source: og_marl
+  env: mamujoco
+  scenario: 2halfcheetah
+  dataset: Good
+
+system:
+  learning_rate: 0.001
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  grad_norm_clip: 10.0
+  # 25 gradient steps between target refreshes at batch_size_run 2, matching the
+  # 200/8 cadence of the SMAC reference configs.
+  target_update_interval: 50
+  add_agent_id_to_obs: true
+  num_ood_actions: 10
+  cql_weight: 1.0
+  dual_alpha: true
+  # The SMAC value of 0.8 sits below the entropy floor of the push-down term
+  # here (logsumexp over 2k=20 IS-corrected candidates adds ~log 20 plus the
+  # log|U|=2*log 27=6.6 uniform offset), so alpha would ramp for the whole run
+  # and never reach a fixed point. Measured cql_diff falls 571 -> 408 over 300
+  # updates as Q_tot climbs toward the anchor; 5.0 is just above that floor.
+  target_action_gap: 5.0
+  alpha_lr: 0.0001
+  alpha_init: 1.0
+  eps_start: 1.0
+  eps_min: 0.05
+  # Anneal the epsilon-greedy CQL proposal over the first 1% of the offline
+  # budget (3000 updates x 128,000 steps), as 1e5 does for the 1e7 SMAC budget.
+  eps_decay_steps: 3840000
+  mixing_ratio: 0.1
+  device: cuda
+
+online:
+  t_max: 3000000
+  test_interval: 100000
+  log_path: checkpoints/macal_2halfcheetah_online/online.jsonl
+
+transfer:
+  mode: none

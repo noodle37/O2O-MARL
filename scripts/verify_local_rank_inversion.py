@@ -430,13 +430,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--n-seeds", type=int, default=8)
     parser.add_argument("--seed0", type=int, default=1)
+    parser.add_argument("--config", default="configs/5m_vs_6m.yaml")
+    parser.add_argument("--checkpoint", default=None, help="default: checkpoint_path in config")
+    parser.add_argument("--out", default="logs/verify_local_rank_inversion.json")
     args = parser.parse_args()
 
     ensure_project_root()
-    cfg = OmegaConf.to_container(OmegaConf.load("configs/5m_vs_6m.yaml"), resolve=True)
+    cfg = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
     cfg["system"]["data_device"] = "cpu"
     cfg["system"]["device"] = "cpu"
-    ckpt = resolve_path(cfg["checkpoint_path"])
+    ckpt = resolve_path(args.checkpoint or cfg["checkpoint_path"])
     gamma = float(cfg["system"]["discount"])
     print(f"checkpoint={ckpt} probe_step={PROBE_STEP + 1} gamma={gamma} updates=0", flush=True)
 
@@ -455,7 +458,7 @@ def main() -> None:
     learner.mixer.eval()
     support = support_cpu.to(learner.device)
 
-    out = Path(resolve_path("logs")) / "verify_local_rank_inversion.json"
+    out = Path(resolve_path(args.out))
     out.parent.mkdir(parents=True, exist_ok=True)
     seed_rows = []
     seeds = list(range(args.seed0, args.seed0 + args.n_seeds))
@@ -475,6 +478,7 @@ def main() -> None:
             close_env(env)
         seed_rows.append(row)
         payload = {
+            "config": args.config,
             "checkpoint": ckpt,
             "probe_step_1based": PROBE_STEP + 1,
             "gamma": gamma,

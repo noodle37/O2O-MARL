@@ -10,13 +10,13 @@ import os
 import sys
 import time
 
-import torch
 from omegaconf import OmegaConf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.evaluation import evaluate  # noqa: E402
 from training.factory import build_learner, load_vault_dataset, make_env  # noqa: E402
+from utils.checkpoint import load_qmix_checkpoint  # noqa: E402
 from utils.paths import ensure_project_root  # noqa: E402
 
 
@@ -48,11 +48,14 @@ def main() -> None:
 
     dataset = load_vault_dataset(cfg)
     learner = build_learner(cfg, dataset)
-    payload = torch.load(args.checkpoint, map_location=learner.device, weights_only=False)
-    learner.q_network.load_state_dict(payload["q_network"])
-    learner.mixer.load_state_dict(payload["mixer"])
-    learner.q_network.eval()
-    learner.mixer.eval()
+    payload = load_qmix_checkpoint(args.checkpoint, learner, map_location=learner.device)
+    if hasattr(learner, "load_state"):
+        learner.flow.eval()
+        learner.policy.eval()
+        learner.critic.eval()
+    else:
+        learner.q_network.eval()
+        learner.mixer.eval()
     meta = payload.get("extra", {})
     print(f"[eval640] tag={args.tag} ckpt={args.checkpoint} meta={meta}", flush=True)
 

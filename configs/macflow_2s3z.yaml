@@ -1,24 +1,28 @@
-# MAC-Flow O2O on 2s3z.
-# Budget and eval follow OVMSE (configs/2s3z.yaml). Algorithm knobs stay MAC-Flow.
+# MAC-Flow O2O on 2s3z, aligned with the original repo (smac_o2o_main.py):
+# 500K offline gradient steps + 500K online env steps (1 update per env step,
+# after a 32x20 warmup), batch 32 sequences of length 20, greedy collection,
+# eval every 100K env steps over 10 episodes (repo discrete agent: 256x4 MLPs,
+# gamma 0.99, adam eps 1e-8, no grad clipping, normalize_q off).
 learner_type: mac_flow
 system_name: "mac_flow 2s3z"
 seed: 1
 wandb_project: og-marl
 phase: offline
-count_updates: false
-t_max: 3000000
+count_updates: true
+t_max: 500000
 buffer_size: 5000
-batch_size: 128
-batch_size_run: 2
-test_interval: 10000
-num_eval_episodes: 32
+batch_size: 32
+sequence_length: 20
+batch_size_run: 1
+test_interval: 100000
+num_eval_episodes: 10
 save_best_checkpoint: true
 checkpoint_dir: checkpoints/macflow_2s3z
-checkpoint_path: checkpoints/macflow_2s3z/mac_flow_seed1_best.pt
+checkpoint_path: checkpoints/macflow_2s3z/mac_flow_seed1.pt
 log_path: checkpoints/macflow_2s3z/offline.jsonl
 
 task:
-  source: cfcql
+  source: og_marl
   env: smac_v1
   scenario: 2s3z
   dataset: Medium
@@ -26,21 +30,25 @@ task:
 
 system:
   learning_rate: 0.0003
-  discount: 0.995
+  discount: 0.99
   alpha_distill: 3.0
   flow_steps: 10
   polyak_tau: 0.005
-  grad_norm_clip: 10.0
-  normalize_q: true
+  grad_norm_clip: 0.0
+  normalize_q: false
+  hidden_dims: [256, 256, 256, 256]
+  actor_layer_norm: false
+  t_embed_frequencies: 8
+  adam_eps: 1.0e-8
   mixing_ratio: 0.0
-  eps_start: 1.0
-  eps_min: 0.05
-  eps_decay_steps: 100000
+  eps_start: 0.0
+  eps_min: 0.0
+  eps_decay_steps: 1
   device: cuda
 
 online:
-  t_max: 1000000
-  test_interval: 10000
+  t_max: 500000
+  test_interval: 100000
   log_path: checkpoints/macflow_2s3z/online.jsonl
 
 transfer:

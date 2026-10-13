@@ -99,14 +99,19 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             act_dim=act_dim,
             action_mode="continuous" if continuous else "discrete",
             learning_rate=float(sys_cfg.get("learning_rate", 3e-4)),
-            gamma=float(sys_cfg.get("discount", 0.995)),
+            gamma=float(sys_cfg.get("discount", 0.99)),
             alpha_distill=float(sys_cfg.get("alpha_distill", 3.0)),
             flow_steps=int(sys_cfg.get("flow_steps", 10)),
             polyak_tau=float(sys_cfg.get("polyak_tau", 0.005)),
-            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 10.0)),
-            normalize_q=bool(sys_cfg.get("normalize_q", True)),
+            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 0.0)),
+            normalize_q=bool(sys_cfg.get("normalize_q", False)),
             device=str(sys_cfg.get("device", "cuda")),
             batch_size_run=int(cfg.get("batch_size_run", 1)),
+            sequence_length=int(cfg.get("sequence_length", 20)),
+            hidden_dims=tuple(int(h) for h in sys_cfg.get("hidden_dims", (256, 256, 256, 256))),
+            actor_layer_norm=bool(sys_cfg.get("actor_layer_norm", False)),
+            t_embed_frequencies=int(sys_cfg.get("t_embed_frequencies", 8)),
+            adam_eps=float(sys_cfg.get("adam_eps", 1e-8)),
         )
     if learner_type == "macal_ql":
         return MaCalQLLearner(
