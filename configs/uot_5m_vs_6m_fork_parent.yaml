@@ -1,0 +1,58 @@
+# UOT fork parent run on 5m_vs_6m (Medium): identical to configs/uot_5m_vs_6m.yaml
+# except that it stops at the fork point and writes a full trainer snapshot.
+# Continue / OFF / Decay branches resume from that snapshot; see
+# scripts/run_uot_fork_5m_vs_6m.sh and .stepcode/plans/ for the design.
+# FORK_AT is overridden by the driver (default 1000000 = 1.0M env steps).
+learner_type: uot
+system_name: "uot fork parent 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/uot_fork_5m_vs_6m_seed1
+checkpoint_path: checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1.pt
+log_path: checkpoints/uot_fork_5m_vs_6m_seed1/parent.jsonl
+
+fork_at: 1000000
+fork_branch: main
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  grad_norm_clip: 10.0
+  target_update_interval: 200
+  add_agent_id_to_obs: true
+  uot_eta: 0.1
+  uot_delta: 0.1
+  uot_margin: 0.1
+  uot_k: 8
+  uot_max_hamming: 2
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  mixing_ratio: 0.0
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+
+transfer:
+  mode: none

@@ -42,6 +42,8 @@ class UOTLearner(QMIXBase):
         add_agent_id_to_obs: bool = True,
         eta: float = 0.1,
         eta_drop_at: int = -1,
+        eta_decay_start: int = -1,
+        eta_decay_steps: int = 0,
         delta: float = 0.1,
         margin: float = 0.1,
         n_candidates: int = 8,
@@ -60,6 +62,8 @@ class UOTLearner(QMIXBase):
         self.add_agent_id_to_obs = add_agent_id_to_obs
         self.eta = float(eta)
         self.eta_drop_at = int(eta_drop_at)
+        self.eta_decay_start = int(eta_decay_start)
+        self.eta_decay_steps = int(eta_decay_steps)
         self.delta = float(delta)
         self.last_diag: Dict[str, float] = {}
         self.margin = float(margin)
@@ -94,6 +98,7 @@ class UOTLearner(QMIXBase):
         self.training_step_ctr = 0
         print(
             f"UOT S_off={len(self.support)} eta={self.eta} eta_drop_at={self.eta_drop_at} "
+            f"eta_decay_start={self.eta_decay_start} eta_decay_steps={self.eta_decay_steps} "
             f"delta={self.delta} margin={self.margin} k={self.n_candidates} "
             f"max_hamming={self.max_hamming}"
         )
@@ -138,6 +143,26 @@ class UOTLearner(QMIXBase):
         obs = self._augment_obs(batch["obs"], batch["actions"])
         resets = self._resets_from_batch(batch)
         return self._unroll(net, obs, resets)
+
+    def eta_at(self, t_env: int) -> float:
+        """Ranking loss weight at env step t_env.
+
+        Hard off (`eta_drop_at`) and linear decay to zero (`eta_decay_start` +
+        `eta_decay_steps`) both exist so a forked branch can weaken or remove the
+        offline ordering constraint without touching anything else.
+        """
+        if self.eta <= 0:
+            return 0.0
+        if self.eta_drop_at >= 0 and int(t_env) >= self.eta_drop_at:
+            return 0.0
+        if self.eta_decay_start >= 0 and self.eta_decay_steps > 0:
+            span = int(t_env) - self.eta_decay_start
+            if span >= self.eta_decay_steps:
+                return 0.0
+            if span <= 0:
+                return self.eta
+            return self.eta * (1.0 - span / self.eta_decay_steps)
+        return self.eta
 
     def train_on_batch(
         self,
@@ -196,34 +221,40 @@ class UOTLearner(QMIXBase):
             "uot_sign_disagree": 0.0,
         }
         loss_ord = chosen_tot.new_zeros(())
-        eta_now = 0.0 if self.eta_drop_at >= 0 and int(t_env) >= self.eta_drop_at else self.eta
+        eta_now = self.eta_at(int(t_env))
         if self.eta > 0 and self.frozen_q_network is not None and self.frozen_mixer is not None:
-            with torch.no_grad():
-                bar_out = self._forward_net(self.frozen_q_network, batch)
-            cand, valid = build_recorded_neighborhood(
-                mac_out[:, :-1],
-                bar_out[:, :-1],
-                avail[:, :-1],
-                actions[:, :-1],
-                self.support,
-                k=self.n_candidates,
-                max_hamming=self.max_hamming,
-            )
-            q_live = self._qtot_candidates(self.mixer, mac_out[:, :-1], cand, states[:, :-1])
-            with torch.no_grad():
-                q_bar = self._qtot_candidates(
-                    self.frozen_mixer, bar_out[:, :-1], cand, states[:, :-1]
+            # When the weight is zero the term is still evaluated (no grad) so every
+            # branch logs the constraint it would have felt, not just the ones it felt.
+            with torch.set_grad_enabled(eta_now > 0.0):
+                with torch.no_grad():
+                    bar_out = self._forward_net(self.frozen_q_network, batch)
+                cand, valid = build_recorded_neighborhood(
+                    mac_out[:, :-1],
+                    bar_out[:, :-1],
+                    avail[:, :-1],
+                    actions[:, :-1],
+                    self.support,
+                    k=self.n_candidates,
+                    max_hamming=self.max_hamming,
                 )
-            loss_ord, ord_stats = ordinal_hinge(
-                q_live,
-                q_bar,
-                cand,
-                valid,
-                mask.squeeze(-1) > 0,
-                delta=self.delta,
-                margin=self.margin,
-            )
+                q_live = self._qtot_candidates(
+                    self.mixer, mac_out[:, :-1], cand, states[:, :-1]
+                )
+                with torch.no_grad():
+                    q_bar = self._qtot_candidates(
+                        self.frozen_mixer, bar_out[:, :-1], cand, states[:, :-1]
+                    )
+                loss_ord, ord_stats = ordinal_hinge(
+                    q_live,
+                    q_bar,
+                    cand,
+                    valid,
+                    mask.squeeze(-1) > 0,
+                    delta=self.delta,
+                    margin=self.margin,
+                )
         loss = loss_td + eta_now * loss_ord
+        reg_strength = eta_now * float(loss_ord.detach()) / max(float(loss_td.detach()), 1e-8)
 
         self.training_step_ctr += 1
         self.optimizer.zero_grad()
@@ -248,7 +279,9 @@ class UOTLearner(QMIXBase):
             "loss": float(loss.detach().item()),
             "loss_td": float(loss_td.detach().item()),
             "loss_ord": float(loss_ord.detach().item()),
+            "uot_eta": float(self.eta),
             "uot_eta_now": float(eta_now),
+            "reg_strength": float(reg_strength),
             "grad_norm": float(grad_norm.detach().item()),
             "mean_chosen_q_values": float(chosen_tot.detach().mean().item()),
             "n_soff": float(len(self.support)),
@@ -261,5 +294,8 @@ class UOTLearner(QMIXBase):
             "uot_hinge_rate": float(ord_stats["uot_hinge_rate"]),
             "uot_n_pairs": float(ord_stats["uot_n_pairs"]),
             "uot_eta_now": float(eta_now),
+            "loss_td": float(loss_td.detach().item()),
+            "loss_ord": float(loss_ord.detach().item()),
+            "reg_strength": float(reg_strength),
         }
         return logs

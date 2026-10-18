@@ -1,0 +1,58 @@
+# Pure online QMIX TD-lambda fine-tune from the offline checkpoint.
+# Continuation B for the offline-ranking reliability experiment (task 2).
+# Deliberately ranking-agnostic: no OVM magnitude target, no CQL conservative
+# term, no offline batch mixing, no UOT ordinal hinge. Only online TD-lambda
+# updates from the loaded offline checkpoint, epsilon-greedy behaviour.
+system_name: "pure_online 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 120000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/pure_online_5m_vs_6m
+checkpoint_path: checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1_best.pt
+log_path: checkpoints/pure_online_5m_vs_6m/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.0003
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  grad_norm_clip: 10.0
+  target_update_interval: 200
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 0.2
+  eps_min: 0.05
+  eps_decay_steps: 50000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 120000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td

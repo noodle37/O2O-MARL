@@ -51,6 +51,8 @@ def _build_qmix_cql(cfg: Dict[str, Any], dataset: EpisodeDataset) -> PaperQMIXLe
         mixing_ratio=float(sys_cfg.get("mixing_ratio", 0.0)),
         lambda_memory_end=float(sys_cfg.get("lambda_memory_end", 1.0)),
         lambda_anneal_steps=int(sys_cfg.get("lambda_anneal_steps", 0)),
+        ovm_diag_train_stats=bool(sys_cfg.get("ovm_diag_train_stats", True)),
+        ovm_diag_stride=int(sys_cfg.get("ovm_diag_stride", 4)),
         device=str(sys_cfg.get("device", "cuda")),
     )
 
@@ -81,6 +83,8 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             add_agent_id_to_obs=bool(sys_cfg.get("add_agent_id_to_obs", True)),
             eta=float(sys_cfg.get("uot_eta", 0.1)),
             eta_drop_at=int(sys_cfg.get("uot_eta_drop_at", -1)),
+            eta_decay_start=int(sys_cfg.get("uot_eta_decay_start", -1)),
+            eta_decay_steps=int(sys_cfg.get("uot_eta_decay_steps", 0)),
             delta=float(sys_cfg.get("uot_delta", 0.1)),
             margin=float(sys_cfg.get("uot_margin", 0.1)),
             n_candidates=int(sys_cfg.get("uot_k", 8)),

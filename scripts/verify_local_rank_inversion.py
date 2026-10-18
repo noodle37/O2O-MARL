@@ -12,6 +12,23 @@ return of "take this joint action, then act greedy":
 
 A pair is an inversion when the Q_tot order and the return order disagree.
 The same seed must reproduce the greedy prefix; otherwise that seed is dropped.
+
+WHAT THIS MEASURES: at one state per seed, whether Q_tot orders joint actions
+the same way their greedy-continuation returns do. The baseline is the
+critic's own implicit policy (greedy after the forced action), which is the
+right target for Q_tot. This is the only protocol here that compares actions
+at the same state.
+
+WHAT IT DOES NOT MEASURE: (a) it is not a value-error measurement - the Q_tot
+magnitudes are on a different scale from the returns, so only the order is
+comparable; (b) the candidate set is the full legal x recorded support, which
+is NOT the pair population any algorithm consumes - UOT compares at most K=8
+Hamming-ball joints around the frozen-greedy / live-greedy / executed anchors,
+margin-filtered, at online-policy states (see uot/neighborhood.py and
+uot/hinge.py). Rates here therefore do not transfer to the algorithm's hinge;
+use the learner's own uot_sign_disagree for that. (c) one state per seed, three
+pairs per state that share the ranking: the effective sample is the number of
+seeds, so all rates are reported with a seed-clustered standard error.
 """
 
 from __future__ import annotations
@@ -303,6 +320,8 @@ def _record_pair(
         "count_a": count_a,
         "count_b": count_b,
         "min_count": min(count_a, count_b),
+        "abs_q_gap": abs(q_a - q_b),
+        "abs_return_gap": abs(g_a - g_b),
         "outcome": pair_outcome(q_a, q_b, g_a, g_b),
     }
 
@@ -387,18 +406,53 @@ def evaluate_seed(env, learner, support, counts, gamma: float, seed: int, check_
     }
 
 
+def _clustered_rate(values: list[float]) -> dict:
+    """Mean, seed-clustered SE and 95% CI for a per-seed rate."""
+    v = np.asarray([x for x in values if x is not None], dtype=np.float64)
+    if v.size == 0:
+        return {"n_seeds": 0, "mean": None, "se": None, "ci95": None}
+    if v.size == 1:
+        return {"n_seeds": 1, "mean": float(v.mean()), "se": None, "ci95": None}
+    se = float(v.std(ddof=1) / np.sqrt(v.size))
+    return {
+        "n_seeds": int(v.size),
+        "mean": float(v.mean()),
+        "se": se,
+        "ci95": [float(v.mean() - 1.96 * se), float(v.mean() + 1.96 * se)],
+    }
+
+
 def _rate(records: list[dict]) -> dict:
     decided = [r for r in records if r["outcome"] in ("agree", "invert")]
     n_inv = sum(r["outcome"] == "invert" for r in decided)
     n = len(decided)
     gaps = [abs(r["g_a"] - r["g_b"]) for r in decided]
+    q_gaps = [r["abs_q_gap"] for r in decided]
+    seeds = sorted({r["seed"] for r in records})
+    per_seed = [
+        (
+            np.mean([r["outcome"] == "agree" for r in decided if r["seed"] == s])
+            if any(r["seed"] == s for r in decided)
+            else None
+        )
+        for s in seeds
+    ]
     return {
         "n_pairs": len(records),
         "n_tie": sum(r["outcome"] == "tie" for r in records),
         "n_decided": n,
         "n_invert": n_inv,
+        "n_seeds": len(seeds),
         "concordance": None if n == 0 else (n - n_inv) / n,
+        "concordance_seed_clustered": _clustered_rate(per_seed),
         "median_abs_return_gap": None if not gaps else float(np.median(gaps)),
+        "median_abs_q_gap": None if not q_gaps else float(np.median(q_gaps)),
+        # Q_tot and the realised return are on different scales; this ratio is
+        # the size of that mismatch, not an error.
+        "median_abs_q_gap_over_return_gap": (
+            None if not gaps else float(np.median(np.array(q_gaps) / np.maximum(np.array(gaps), 1e-9)))
+        ),
+        "population": "pairs at one probe state per seed, candidate set = legal x recorded support",
     }
 
 
@@ -415,7 +469,7 @@ def summarize(seed_rows: list[dict]) -> dict:
         sparse["median_min_count"] = med
         sparse["low"] = _rate([pair for pair in top if pair["min_count"] <= med])
         sparse["high"] = _rate([pair for pair in top if pair["min_count"] > med])
-    return {
+    out = {
         "n_seeds_ok": len(ok),
         "n_seeds": len(seed_rows),
         "pooled": _rate(flat),
@@ -423,6 +477,11 @@ def summarize(seed_rows: list[dict]) -> dict:
         "top_by_count": sparse,
         "seed_status": {str(row["seed"]): row["status"] for row in seed_rows},
     }
+    # Deprecated aliases: previous key names, kept for compatibility with
+    # already-written result files. Do not use them in new write-ups.
+    out["concordance_pooled"] = out["pooled"]["concordance"]
+    out["concordance_by_kind"] = {k: v["concordance"] for k, v in by_kind.items()}
+    return out
 
 
 def main() -> None:
@@ -488,6 +547,16 @@ def main() -> None:
         }
         out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(json.dumps(payload["summary"], indent=2), flush=True)
+        n_ok = sum(1 for row in seed_rows if row["status"] == "ok")
+        if 0 < n_ok < 20:
+            print(
+                f"WARNING: only {n_ok} usable seeds. Each seed contributes one state and "
+                "three pairs that share the same ranking, so the effective sample is "
+                f"{n_ok}, not {3 * n_ok}. Seed-clustered 95% CIs are reported in "
+                "summary.*.concordance_seed_clustered; treat rates from fewer than ~30 "
+                "seeds as indicative only.",
+                flush=True,
+            )
         if row["status"] == "replay_mismatch":
             raise RuntimeError("greedy replay did not reproduce the episode; branch returns are not comparable")
 

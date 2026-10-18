@@ -11,6 +11,7 @@ import torch
 
 from ovmse.behaviour import BehaviourCloningMixin
 from ovmse.cql import CQLLossMixin
+from ovmse.diagnostics import ovm_target_stats
 from ovmse.ovm import OVMMixin
 from ovmse.targets import build_td_lambda_targets
 from qmix.core import QMIXBase
@@ -52,6 +53,8 @@ class PaperQMIXLearner(
         mixing_ratio: float = 0.0,
         lambda_memory_end: float = 1.0,
         lambda_anneal_steps: int = 0,
+        ovm_diag_train_stats: bool = True,
+        ovm_diag_stride: int = 4,
         device: str = "cuda",
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -74,6 +77,8 @@ class PaperQMIXLearner(
         self.mixing_ratio = mixing_ratio
         self.lambda_memory_end = lambda_memory_end
         self.lambda_anneal_steps = lambda_anneal_steps
+        self.ovm_diag_train_stats = bool(ovm_diag_train_stats)
+        self.ovm_diag_stride = max(1, int(ovm_diag_stride))
 
         self.obs_dim = obs_dim
         self.hidden_dim = recurrent_layer_dim
@@ -166,13 +171,38 @@ class PaperQMIXLearner(
         ).detach()
 
         lam = self.get_lambda_memory(t_env)
-        if ovm_on and self.offline_q_network is not None and self.offline_mixer is not None:
+        ovm_stats: Dict[str, float] = {}
+        offline_ready = self.offline_q_network is not None and self.offline_mixer is not None
+        # OVM-on: off_tot is already computed for the loss, so the stats are free.
+        # OVM-off: recompute on a stride so the extra frozen unroll stays cheap.
+        stride_hit = (self.training_step_ctr % self.ovm_diag_stride) == 0
+        if ovm_on and offline_ready:
+            off_tot = self._offline_chosen_tot(batch, actions, states)
             loss = self._ovm_td_loss(
-                batch, actions, states, chosen_tot, td_targets, mask_exp, lam
+                batch, actions, states, chosen_tot, td_targets, mask_exp, lam, off_tot=off_tot
             )
+            if self.ovm_diag_train_stats:
+                ovm_stats = ovm_target_stats(
+                    off_tot,
+                    td_targets,
+                    mask_exp,
+                    lam,
+                    chosen_tot=chosen_tot,
+                    prefix="train_ovm/",
+                )
         else:
             td_err = 0.5 * (chosen_tot[:, :-1] - td_targets) ** 2
             loss = (td_err * mask_exp).sum() / mask_exp.sum().clamp(min=1.0)
+            if self.ovm_diag_train_stats and offline_ready and stride_hit:
+                off_tot = self._offline_chosen_tot(batch, actions, states)
+                ovm_stats = ovm_target_stats(
+                    off_tot,
+                    td_targets,
+                    mask_exp,
+                    lam,
+                    chosen_tot=chosen_tot,
+                    prefix="train_ovm/",
+                )
 
         cql_loss_val = 0.0
         if cql_w > 0:
@@ -209,6 +239,7 @@ class PaperQMIXLearner(
             "grad_norm": float(grad_norm.detach().item()),
             "mean_chosen_q_values": mean_q,
             "lambda_memory": lam,
+            **ovm_stats,
         }
 
     def state_dicts(self) -> Dict[str, Any]:

@@ -1,0 +1,70 @@
+# UOT fork branch on 5m_vs_6m (Medium). One config serves all three branches; the
+# driver scripts/run_uot_fork_5m_vs_6m.sh supplies the per-branch overrides:
+#
+#   continue : (no eta override)              eta(t) = 0.1
+#   off      : uot_eta_drop_at=<T_fork*>      eta(t) = 0
+#   decay    : uot_eta_decay_start=<T_fork*>
+#              uot_eta_decay_steps=<T_end - T_fork*>
+#
+# Everything else (system block, buffer, env seeds, eval protocol) is byte-identical
+# to the parent config, so the branches differ only in the ranking loss weight.
+# resume_fork points at the parent's trainer snapshot; the offline checkpoint is not
+# loaded again (Q-bar comes from the snapshot, not from a re-freeze).
+learner_type: uot
+system_name: "uot fork branch 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/uot_fork_5m_vs_6m_seed1
+checkpoint_path: checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1.pt
+log_path: checkpoints/uot_fork_5m_vs_6m_seed1/branch.jsonl
+
+resume_fork: null
+fork_parent_log: null
+# Quoted on purpose: a bare `off` is a YAML 1.1 boolean and would parse as False.
+fork_branch: "continue"
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  grad_norm_clip: 10.0
+  target_update_interval: 200
+  add_agent_id_to_obs: true
+  uot_eta: 0.1
+  uot_eta_drop_at: -1
+  uot_eta_decay_start: -1
+  uot_eta_decay_steps: 0
+  uot_delta: 0.1
+  uot_margin: 0.1
+  uot_k: 8
+  uot_max_hamming: 2
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  mixing_ratio: 0.0
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+
+transfer:
+  mode: none

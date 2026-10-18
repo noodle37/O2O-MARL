@@ -7,3 +7,4 @@ wandb/
 .pytest_cache/
 *.pdf
 experiments/
+.stepcode/

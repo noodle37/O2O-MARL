@@ -35,6 +35,22 @@ class OVMMixin:
             1.0 - (1.0 - self.lambda_memory_end) / self.lambda_anneal_steps * t,
         )
 
+    def _offline_chosen_tot(
+        self,
+        batch: Dict[str, torch.Tensor],
+        actions: torch.Tensor,
+        states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Frozen offline Q_tot of the executed actions (read-only, no autograd)."""
+        with torch.no_grad():
+            off_out = self._unroll(
+                self.offline_q_network,
+                self._augment_obs(batch["obs"], batch["actions"]),
+                self._resets_from_batch(batch),
+            )
+            off_chosen = torch.gather(off_out[:, :-1], 3, actions[:, :-1].long())
+            return self.offline_mixer(off_chosen, states[:, :-1])
+
     def _ovm_td_loss(
         self,
         batch: Dict[str, torch.Tensor],
@@ -44,16 +60,11 @@ class OVMMixin:
         td_targets: torch.Tensor,
         mask_exp: torch.Tensor,
         lam: float,
+        off_tot: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Blend TD error with max(offline Q_tot, TD target) when OVM is enabled."""
-        with torch.no_grad():
-            off_out = self._unroll(
-                self.offline_q_network,
-                self._augment_obs(batch["obs"], batch["actions"]),
-                self._resets_from_batch(batch),
-            )
-            off_chosen = torch.gather(off_out[:, :-1], 3, actions[:, :-1].long())
-            off_tot = self.offline_mixer(off_chosen, states[:, :-1])
+        if off_tot is None:
+            off_tot = self._offline_chosen_tot(batch, actions, states)
         ovm_targets = torch.maximum(off_tot, td_targets)
         td_err = (chosen_tot[:, :-1] - td_targets) ** 2
         ovm_err = (chosen_tot[:, :-1] - ovm_targets) ** 2
