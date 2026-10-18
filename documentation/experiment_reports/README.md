@@ -8,6 +8,7 @@
 | 任务二：验证离线联合动作排序可靠性 | [task2_rank_reliability.md](task2_rank_reliability.md) | 96 个状态、3,488 组联合动作对的分支回放实测：离线排序整体一致率 0.614（CI [0.582, 0.646]），greedy 决策附近≈抛硬币；Q gap 与数据支持程度都不能稳定预测排序正确性 |
 | 任务三：5m_vs_6m Ranking Loss 分叉实验 | [task3_ranking_loss_fork.md](task3_ranking_loss_fork.md) | 同一 trainer 快照分出 continue / off / decay 三支各续训约 199 万步：640 集终局配对评估上撤除与衰减优于保留约 0.16–0.17，撤除与衰减之间无差别 |
 | 任务四：直接验证 OVM 的价值约束机制 | [task4_ovm_mechanism.md](task4_ovm_mechanism.md) | 三张图同 init 的 on/off 受控对照：OVM 确实在整个训练过程中持续把目标抬高到普通 TD target 之上（直接测量）；"抬高导致性能差异"未建立因果 |
+| 任务五：3s5z_vs_3s6z 上 OVM 与无 OVM 在线训练全程对照 | [task5_ovm_vs_no_ovm_3s5z.md](task5_ovm_vs_no_ovm_3s5z.md) | 同一离线模型出发的两条对照臂约 285 万步：前期（15 万步起）OVM 臂明显更好，无 OVM 臂回报跌至 2.3、排序被打乱；无 OVM 臂逐步恢复并于约 180–210 万步反超；终点无 OVM 臂 15.57 对 OVM 臂 13.93，且 Q 偏差降到接近零而 OVM 臂回升到 11.6 |
 
 ## 复现方式
 
