@@ -23,6 +23,7 @@ TRANSFER_MODES = frozenset(
         "shift_minus",
         "none",
         "scratch",
+        "fsr",
     }
 )
 
@@ -123,5 +124,5 @@ def apply_transfer(
         sync_targets(learner)
         return mode
 
-    # ovmse, full_td: weights unchanged
+    # ovmse, full_td, fsr: weights unchanged
     return mode

@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from data.vault_dataset import print_dataset_stats
+from fsr.learner import FSRLearner
 from macal.learner import MaCalQLLearner
 from macflow.learner import MACFlowLearner
 from ovmse.diagnostics import ovm_fixed_sample_diag
@@ -32,6 +33,10 @@ def offline_checkpoint_names(learner_type: str, seed: Any) -> List[str]:
         stem = "macal_ql"
     elif lt == "mac_flow":
         stem = "mac_flow"
+    elif lt == "fsr":
+        stem = "fsr"
+    elif lt == "sim2o":
+        stem = "sim2o"
     else:
         stem = "ovmse_paper"
     return [f"{stem}_seed{seed}_best.pt", f"{stem}_seed{seed}.pt"]
@@ -65,6 +70,10 @@ def _load_learner_weights(learner, payload: Dict[str, Any]) -> None:
         learner.optimizer.load_state_dict(payload["optimizer"])
     if "training_step_ctr" in payload:
         learner.training_step_ctr = int(payload["training_step_ctr"])
+    if hasattr(learner, "load_fsr_state"):
+        learner.load_fsr_state(payload)
+    if hasattr(learner, "load_offline_state"):
+        learner.load_offline_state(payload)
 
 
 FORK_BRANCHES = ("continue", "off", "decay")
@@ -102,6 +111,22 @@ def _fork_snapshot_path(cfg: Dict[str, Any], t_env: int) -> str:
 
 def _fork_meta_path(cfg: Dict[str, Any], t_env: int) -> str:
     return _fork_snapshot_path(cfg, t_env).replace(".pt", ".json")
+
+
+def _periodic_boundary(t_env: int, ckpt_every: int, last_multiple: int) -> Optional[int]:
+    """Return the new checkpoint multiple once t_env has crossed one, else None.
+
+    t_env advances by whole episodes, so on variable-length maps (SMAC) it almost
+    never lands exactly on a multiple of ckpt_every; comparing consecutive
+    divisions therefore never fires and no periodic checkpoint is ever written.
+    Track the last saved multiple instead and fire on crossing. The returned
+    multiple names the checkpoint after the boundary it covers, while the true
+    t_env stays in the checkpoint's `extra`.
+    """
+    if ckpt_every <= 0:
+        return None
+    multiple = t_env // ckpt_every
+    return multiple if multiple > last_multiple else None
 
 
 def _seed_branch_log(cfg: Dict[str, Any]) -> None:
@@ -223,6 +248,26 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
     offline_data = load_vault_dataset(cfg)
     print_dataset_stats(offline_data, label="online_offline_vault")
     learner = build_learner(cfg, offline_data)
+    learner.sequential_explore = bool(cfg["system"].get("sequential_explore", False))
+    # A conservative term in the online phase needs the CFCQL behaviour prior.  The
+    # offline phase trains and caches it, so load the cache here instead of letting
+    # the loss run against an untrained network.
+    if (
+        float(cfg["system"].get("online_cql_weight", 0.0)) > 0
+        and getattr(learner, "moderate_lambda", False)
+        and not getattr(learner, "_behaviour_trained", False)
+    ):
+        cache = cfg.get("behaviour_cache_dir")
+        print(
+            f"[online] preparing behaviour prior for the online conservative term "
+            f"(cache={cache})",
+            flush=True,
+        )
+        learner.train_behaviour(
+            offline_data,
+            cache_path=str(cache) if cache else None,
+            batch_size=int(cfg.get("batch_size", 128)),
+        )
 
     mode = _transfer_mode(cfg)
     transfer_block = cfg.get("transfer") or {}
@@ -236,6 +281,13 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
 
     batch_size_run = int(cfg.get("batch_size_run", 1))
     envs = [make_env(cfg, seed=int(cfg["seed"]) + i) for i in range(batch_size_run)]
+    # Dedicated evaluation environment.  SMAC v1 derives its episode sequence from
+    # how many times reset() has been called, so scoring on a collection env would
+    # put every arm on a different episode set at the same t_env.  A separate env
+    # with a fixed seed gives all arms identical evaluation episodes.
+    eval_env_seed = int(cfg.get("eval_env_seed", 0) or 0)
+    eval_env = make_env(cfg, seed=eval_env_seed) if eval_env_seed > 0 else None
+    eval_target = eval_env if eval_env is not None else envs[0]
     logger = make_logger(cfg)
     num_eval = int(cfg.get("num_eval_episodes", 32))
 
@@ -252,7 +304,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         ckpt = str(resume_fork)
         use_ovm = False
         mode = "fork_resume"
-        pre = evaluate(envs[0], learner, num_eval, t_env, cfg)
+        pre = evaluate(eval_target, learner, num_eval, t_env, cfg)
         logger.write(
             pre
             | dict(getattr(learner, "last_diag", {}) or {})
@@ -282,15 +334,26 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 if hasattr(learner, "freeze_oracle"):
                     learner.freeze_oracle()
 
-            # Frozen offline nets for diagnostics (and OVM targets); always from the offline checkpoint file.
-            if hasattr(learner, "load_offline_for_ovm"):
-                learner.load_offline_for_ovm(ckpt)
+            # Frozen offline nets for diagnostics (and OVM targets).  They come from
+            # the offline reference checkpoint, which defaults to this run's start
+            # but can name a different file: arm D starts from an affine-rescaled
+            # copy and must keep the unscaled net as its reference.  Arm Z (scratch)
+            # opts out entirely so a from-scratch run carries no offline network.
+            reference_ckpt = str(transfer_block.get("offline_reference_ckpt") or ckpt)
+            if hasattr(learner, "load_offline_for_ovm") and bool(
+                transfer_block.get("load_offline_nets", True)
+            ):
+                learner.load_offline_for_ovm(reference_ckpt)
 
             use_ovm = mode == "ovmse"
             learner.use_ovm = use_ovm
+            if isinstance(learner, FSRLearner):
+                learner.use_ovm = False
+                use_ovm = False
+                learner.freeze_flow()
 
         if mode in ("shift_plus", "shift_minus") and shift <= 0.0:
-            pre = evaluate(envs[0], learner, num_eval, 0, cfg)
+            pre = evaluate(eval_target, learner, num_eval, 0, cfg)
             shift = abs(float(pre.get("evaluation/q_bias", 1.0)))
             if shift < 1e-6:
                 shift = 1.0
@@ -305,7 +368,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 force=True,
             )
         else:
-            pre = evaluate(envs[0], learner, num_eval, 0, cfg)
+            pre = evaluate(eval_target, learner, num_eval, 0, cfg)
             logger.write(
                 pre
                 | {"evaluation/training_steps": 0, "t_env": 0, "transfer/mode": mode},
@@ -323,6 +386,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
     print(
         f"online learner={type(learner).__name__} transfer_mode={mode} "
         f"use_ovm={use_ovm} mixing_ratio={float(cfg['system'].get('mixing_ratio', 0.0))} "
+        f"seq_explore={bool(getattr(learner, 'sequential_explore', False))} "
         f"shift={shift} offline_ckpt={ckpt} fork_at={fork_at} branch={branch} "
         f"resume_fork={resume_fork}"
     )
@@ -358,14 +422,31 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
     def eps_at(t: int) -> float:
         return learner.linear_epsilon(t, eps_start, eps_min, eps_decay)
 
+    eval_interval_early = int(cfg.get("eval_interval_early", 0) or 0)
+    eval_interval_late = int(cfg.get("eval_interval_late", 0) or 0)
+    eval_switch_t = int(cfg.get("eval_switch_t", 0) or 0)
+
     diag_sample = _load_ovm_diag_sample(cfg, learner.device)
     train_stats: List[Dict[str, float]] = []
     ckpt_every = int((cfg.get("ovm_diag") or {}).get("ckpt_every", 0))
+    # Resume starts mid-interval, so seed the tracker with the interval already covered.
+    last_ckpt_multiple = t_env // ckpt_every if ckpt_every > 0 else -1
+    # Experiment 2b probe: its own cadence, independent of the evaluation cadence.
+    pv_probe_block = cfg.get("pv_probe") or {}
+    probe_every = int(pv_probe_block.get("every", 0) or 0) if pv_probe_block.get("enabled") else 0
+    last_probe_t = -probe_every if probe_every > 0 else 0
 
     while t_env < t_max:
-        if test_interval > 0 and t_env - last_test_t >= test_interval:
+        # Dense early evaluation (eval_interval_early up to eval_switch_t),
+        # then the sparser late interval. Falls back to test_interval when unset.
+        interval = test_interval
+        if eval_interval_early > 0 and t_env <= eval_switch_t:
+            interval = eval_interval_early
+        elif eval_interval_late > 0 and t_env > eval_switch_t:
+            interval = eval_interval_late
+        if interval > 0 and t_env - last_test_t >= interval:
             last_test_t = t_env
-            eval_logs = evaluate(envs[0], learner, num_eval, t_env, cfg)
+            eval_logs = evaluate(eval_target, learner, num_eval, t_env, cfg)
             diag_logs: Dict[str, Any] = {}
             if diag_sample is not None:
                 try:
@@ -400,13 +481,34 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 t_env += int(ep["length"])
             learner.t_env = t_env
 
+        # Experiment 2b: per-state records from the most recent complete episodes.
+        if probe_every > 0 and t_env - last_probe_t >= probe_every and online_buffer:
+            last_probe_t = t_env
+            try:
+                from pv.probe import run_probe
+
+                run_probe(cfg, learner, list(online_buffer), t_env)
+            except Exception as exc:  # keep the run alive; report and continue
+                print(f"[pv_probe] failed at t_env={t_env}: {exc!r}", flush=True)
+
         if len(online_buffer) < total_batch:
             continue
 
         # One gradient step per parallel rollout.
         episode_delta = batch_size_run
-        if mixing_ratio > 0:
-            offline_bs = int(round(total_batch * mixing_ratio))
+        step_mix = mixing_ratio
+        support_info: Dict[str, float] = {}
+        if isinstance(learner, FSRLearner):
+            probe_idx = rng.choice(len(online_buffer), size=min(total_batch, len(online_buffer)), replace=False)
+            probe = stack_episodes(
+                [online_buffer[int(i)] for i in probe_idx],
+                offline_data.stats.max_seq_length,
+                learner.device,
+            )
+            support_info = learner.support_mix_ratio(probe)
+            step_mix = float(support_info.get("fsr/offline_frac", 0.0))
+        if step_mix > 0:
+            offline_bs = int(round(total_batch * step_mix))
             online_bs = total_batch - offline_bs
             if online_bs < 1:
                 online_bs = 1
@@ -424,7 +526,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             train_batch = merge_offline_online(
                 offline_data.sample(offline_bs, rng, device=learner.device),
                 online_batch,
-                mixing_ratio,
+                step_mix,
             )
         else:
             train_batch = online_batch
@@ -440,6 +542,17 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             if count_updates:
                 t_env += 1
                 learner.t_env = t_env
+        elif isinstance(learner, FSRLearner):
+            logs = learner.train_on_batch(
+                train_batch,
+                cql_weight=online_cql,
+                use_ovm=False,
+                t_env=t_env,
+                episode_delta=episode_delta,
+                offline_bs=offline_bs,
+                support_w_mean=support_info.get("fsr/w_mean"),
+            )
+            logs.update(support_info)
         else:
             logs = learner.train_on_batch(
                 train_batch,
@@ -459,7 +572,9 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             train_stats.append(
                 {k: v for k, v in logs.items() if k.startswith("train_ovm/")}
             )
-        if ckpt_every > 0 and t_env // ckpt_every != (t_env - 1) // ckpt_every:
+        boundary = _periodic_boundary(t_env, ckpt_every, last_ckpt_multiple)
+        if boundary is not None:
+            last_ckpt_multiple = boundary
             ckpt_dir_now = resolve_path(cfg.get("checkpoint_dir"))
             if ckpt_dir_now:
                 save_qmix_checkpoint(
@@ -473,7 +588,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                         "transfer_mode": mode,
                         "fork_branch": branch,
                     },
-                    default_name=f"ovm_diag_ckpt_t{t_env}.pt",
+                    default_name=f"ovm_diag_ckpt_t{boundary * ckpt_every}.pt",
                 )
 
     ckpt_dir = resolve_path(cfg.get("checkpoint_dir"))
@@ -483,6 +598,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             if isinstance(learner, MACFlowLearner)
             else "macal"
             if isinstance(learner, MaCalQLLearner)
+            else "fsr"
+            if isinstance(learner, FSRLearner)
             else "ovmse_paper"
         )
         # Fork branches share one directory, so the branch name must be in the file.

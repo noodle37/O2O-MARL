@@ -150,35 +150,64 @@ _READINGS = {
 }
 
 
-def _reading(diffs: Dict[str, Optional[float]]) -> Optional[str]:
-    vals = [d for d in diffs.values() if d is not None]
+def _reading_multi(diffs: list[Optional[float]]) -> Optional[str]:
+    """Pre-registered multi-seed rule over the per-seed paired differences.
+
+    All seeds must point the same way and the mean paired difference must reach
+    0.10 win rate for "better"; a mean below 0.05 in absolute value or
+    inconsistent directions across seeds is "same"; anything else is
+    "ambiguous".
+    """
+    vals = [d for d in diffs if d is not None]
     if not vals:
         return None
-    best = max(vals)
-    if best >= 0.10:
+    mean = sum(vals) / len(vals)
+    same_dir = all(v > 0 for v in vals) or all(v < 0 for v in vals)
+    if same_dir and abs(mean) >= 0.10:
         return "better"
-    if best <= 0.05:
+    if abs(mean) < 0.05 or not same_dir:
         return "same"
     return "ambiguous"
 
 
+def _direction(diffs: list[Optional[float]]) -> str:
+    """Human-readable direction agreement across seeds."""
+    vals = [d for d in diffs if d is not None]
+    if not vals:
+        return "n/a"
+    if all(v > 0 for v in vals):
+        return f"{len(vals)}/{len(vals)} seed 同向为正"
+    if all(v < 0 for v in vals):
+        return f"{len(vals)}/{len(vals)} seed 同向为负"
+    pos = sum(1 for v in vals if v > 0)
+    return f"方向不一致（{pos} 正 / {len(vals) - pos} 负）"
+
+
 def classify(
-    primary: Dict[str, Optional[float]], decisive: Dict[str, Optional[float]]
+    primary: Dict[str, List[Optional[float]]], decisive: Dict[str, List[Optional[float]]]
 ) -> Tuple[str, str]:
     """按事前约定的判定流程给出结论及依据指标。
 
-    主指标为分叉后尾段胜率均值；当其无法判定（最佳配对差未达到 0.10 的
-    “明显更好”阈值，落在每评测点仅数十集造成的噪声范围内）时，改用决胜指标
-    （640 集终局配对评估）。
+    主指标为分叉后尾段胜率均值；当其无法判定（未达到 0.10 的
+    “明显更好”阈值，或 seed 间方向不一致）时，改用决胜指标
+    （640 集终局配对评估）。两个指标都按同一套多种子规则判定。
     """
-    prim = _reading(primary)
-    if prim == "better":
-        return _READINGS[prim], "主指标（分叉后尾段胜率）"
-    dec = _reading(decisive)
-    if dec is not None:
-        return _READINGS[dec], "决胜指标（640 集终局配对评估）"
-    if prim is not None:
-        return _READINGS[prim], "主指标（分叉后尾段胜率）"
+    prim_off = _reading_multi(primary.get("off", []))
+    prim_dec = _reading_multi(primary.get("decay", []))
+    if "better" in (prim_off, prim_dec):
+        return _READINGS["better"], "主指标（分叉后尾段胜率）"
+    dec_off = _reading_multi(decisive.get("off", []))
+    dec_dec = _reading_multi(decisive.get("decay", []))
+    if "better" in (dec_off, dec_dec):
+        return _READINGS["better"], "决胜指标（640 集终局配对评估）"
+    if "same" in (dec_off, dec_dec) or "same" in (prim_off, prim_dec):
+        return _READINGS["same"], ("决胜指标（640 集终局配对评估）"
+                                   if dec_off is not None or dec_dec is not None
+                                   else "主指标（分叉后尾段胜率）")
+    if prim_off is not None or prim_dec is not None or dec_off is not None or dec_dec is not None:
+        return _READINGS["ambiguous"], ("决胜指标（640 集终局配对评估）"
+                                        if dec_off is not None or dec_dec is not None
+                                        else "主指标（分叉后尾段胜率）")
     return "无法判定（缺少分支数据）", "无可用指标"
 
 
@@ -199,28 +228,37 @@ def main() -> None:
     # 两个指标的配对差：主指标=分叉后尾段胜率，决胜指标=640 集终局配对评估
     tail_diffs: Dict[str, List[float]] = {"off": [], "decay": [], "off_vs_decay": []}
     eval_diffs: Dict[str, List[float]] = {"off": [], "decay": [], "off_vs_decay": []}
+    per_seed: List[Dict[str, Any]] = []
     for seed in seeds:
         br = seed["branches"]
+        entry: Dict[str, Any] = {
+            "name": os.path.basename(seed["run_dir"]), "tail": {}, "eval": {}
+        }
         cont_tail = br["continue"]["tail_win"]
         for key in ("off", "decay"):
             v = br[key]["tail_win"]
             if cont_tail is not None and v is not None:
                 tail_diffs[key].append(v - cont_tail)
+                entry["tail"][key] = v - cont_tail
         if br["off"]["tail_win"] is not None and br["decay"]["tail_win"] is not None:
             tail_diffs["off_vs_decay"].append(br["off"]["tail_win"] - br["decay"]["tail_win"])
+            entry["tail"]["off_vs_decay"] = br["off"]["tail_win"] - br["decay"]["tail_win"]
         cont_e = (br["continue"]["eval640"] or {}).get("win_rate")
         for key in ("off", "decay"):
             v = (br[key]["eval640"] or {}).get("win_rate")
             if cont_e is not None and v is not None:
                 eval_diffs[key].append(v - cont_e)
+                entry["eval"][key] = v - cont_e
         v_off = (br["off"]["eval640"] or {}).get("win_rate")
         v_dec = (br["decay"]["eval640"] or {}).get("win_rate")
         if v_off is not None and v_dec is not None:
             eval_diffs["off_vs_decay"].append(v_off - v_dec)
+            entry["eval"]["off_vs_decay"] = v_off - v_dec
+        per_seed.append(entry)
 
     tail_mu = {k: _mean(v) for k, v in tail_diffs.items()}
     eval_mu = {k: _mean(v) for k, v in eval_diffs.items()}
-    verdict, metric_used = classify(tail_mu, eval_mu)
+    verdict, metric_used = classify(tail_diffs, eval_diffs)
 
     # 实验参数从数据读出，不写死
     fork_t = seeds[0]["fork_t"] if seeds else None
@@ -267,7 +305,33 @@ def main() -> None:
         and b["eval640"].get("win_rate_ci95")
     ]
     half_w = _mean(half_widths)
-    fork_point_txt = f"{fork_t:,}" if fork_t is not None else "n/a"
+
+    # 640 局配对差的 95% 不确定范围（两比例正态近似；分支在同一 env seed 下评估，
+    # 但策略不同则逐局不对应，故不做配对检验）
+    def _eval_diff_ci(seed, name_a: str, name_b: str) -> Optional[float]:
+        ea = seed["branches"][name_a]["eval640"] or {}
+        eb = seed["branches"][name_b]["eval640"] or {}
+        pa, pb = ea.get("win_rate"), eb.get("win_rate")
+        na, nb = int(ea.get("episodes") or 0), int(eb.get("episodes") or 0)
+        if pa is None or pb is None or na <= 0 or nb <= 0:
+            return None
+        return 1.96 * math.sqrt(pa * (1 - pa) / na + pb * (1 - pb) / nb)
+
+    eval_ci: Dict[str, Optional[float]] = {}
+    for key, (a, b) in {
+        "off": ("off", "continue"),
+        "decay": ("decay", "continue"),
+        "off_vs_decay": ("off", "decay"),
+    }.items():
+        vals = [v for v in (_eval_diff_ci(s, a, b) for s in seeds) if v is not None]
+        eval_ci[key] = _mean(vals) if vals else None
+    fork_ts = [s["fork_t"] for s in seeds if s["fork_t"] is not None]
+    if len(set(fork_ts)) > 1:
+        fork_point_txt = (
+            "约 100 万步（逐 seed 分叉点 " + "、".join(f"{t:,}" for t in fork_ts) + "）"
+        )
+    else:
+        fork_point_txt = f"{fork_t:,}" if fork_t is not None else "n/a"
     t_end_txt = f"{t_end:,}" if t_end is not None else "n/a"
     remain_txt = f"{remain / 10000:.0f} 万步" if remain is not None else "n/a"
 
@@ -332,24 +396,55 @@ def main() -> None:
         f"| 640 集终局评估（决胜指标） | {_fmt(eval_mu['off'])} | {_fmt(eval_mu['decay'])} "
         f"| {_fmt(eval_mu['off_vs_decay'])} |"
     )
-    if noise95 is not None:
-        lines.append(
-            f"\n**两个指标的精度不同，给出不同强度的答案。** 主指标（分叉后尾段胜率，"
-            f"最后 {TAIL_POINTS} 个评测点的均值）上三个分支几乎相同，配对差不超过 "
-            f"{_fmt(tail_abs_max)}；但训练内每个评测点只跑 {eval_eps} 集，{TAIL_POINTS} 点均值"
-            f"在胜率约 {_fmt(tail_p)} 处的 95% 不确定范围约 ±{_fmt(noise95)}，"
-            f"测不到这个量级的差异——主指标在此精度下无法判定。决胜指标（640 集终局配对评估）上，"
-            f"off 与 decay 分别比 continue 高 {_fmt(eval_mu['off'])} 与 {_fmt(eval_mu['decay'])}，"
-            f"而 640 集评估的半宽只有约 {_fmt(half_w)}，差距是精度的数倍；"
-            f"off 与 decay 之间只差 {_fmt(eval_mu['off_vs_decay'])}，在半宽以内，无法区分。"
-            f"640 集评估是唯一有足够分辨率区分分支的测量，且它衡量的是整个分叉后窗口"
-            f"（约 {remain_txt}）累积下来的效果，而不是某一时刻的快照。\n"
+    lines.append("\n#### 每个 seed 的配对差（相对 continue 分支，正值表示该分支更好）\n")
+    lines.append(
+        "| seed | off−continue（尾段） | decay−continue（尾段） | off−decay（尾段） "
+        "| off−continue（640局） | decay−continue（640局） | off−decay（640局） |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
+    for e in per_seed:
+        cells = [e["tail"].get(k) for k in ("off", "decay", "off_vs_decay")]
+        cells += [e["eval"].get(k) for k in ("off", "decay", "off_vs_decay")]
+        lines.append(f"| {e['name']} | " + " | ".join(_fmt(c) for c in cells) + " |")
+
+    n_seeds = len(seeds)
+    if noise95 is not None and tail_abs_max is not None:
+        tail_sentence = (
+            f"主指标（分叉后尾段胜率，最后 {TAIL_POINTS} 个评测点的均值）上三个分支的配对差最大为 "
+            f"{_fmt(tail_abs_max)}（{n_seeds} 个 seed 的均值）；训练内每个评测点只跑 "
+            f"{eval_eps or '数十'} 集，{TAIL_POINTS} 点均值在胜率约 {_fmt(tail_p)} 处的 95% "
+            f"不确定范围约 ±{_fmt(noise95)}，"
+            + (
+                "主指标在此精度下无法判定。"
+                if tail_abs_max <= noise95
+                else "主指标配对差超出该范围，可按主指标判定。"
+            )
         )
     else:
-        lines.append(
-            "\n**两个指标的精度不同**：主指标（分叉后尾段胜率）每个评测点局数很少，"
-            "分辨不出 0.1 以下的差异；决胜指标（640 集终局配对评估）精度足够，结论以它为准。\n"
+        tail_sentence = (
+            "主指标（分叉后尾段胜率）每个评测点局数很少，分辨不出 0.1 以下的差异；"
+            "决胜指标（640 集终局配对评估）精度足够，结论以它为准。"
         )
+    od_sentence = (
+        f"off 与 decay 之间只差 {_fmt(eval_mu['off_vs_decay'])}"
+        + (
+            "，在半宽以内，无法区分。"
+            if (half_w is not None and eval_mu["off_vs_decay"] is not None
+                and abs(eval_mu["off_vs_decay"]) <= half_w)
+            else "。"
+        )
+    )
+    lines.append(
+        f"\n**两个指标的精度不同，给出不同强度的答案。** {tail_sentence}"
+        f"决胜指标（640 集终局配对评估）上，off 与 decay 相对 continue 的配对差均值为 "
+        f"{_fmt(eval_mu['off'])} 与 {_fmt(eval_mu['decay'])}；{n_seeds} 个 seed 的方向为 "
+        f"{_direction(eval_diffs['off'])}（off 对 continue）、"
+        f"{_direction(eval_diffs['decay'])}（decay 对 continue）。640 局评估的半宽约 "
+        f"{_fmt(half_w)}，配对差的 95% 不确定范围约 ±{_fmt(eval_ci['off'])}（off 对 continue）"
+        f"与 ±{_fmt(eval_ci['decay'])}（decay 对 continue）。{od_sentence}"
+        f"640 局评估是唯一有足够分辨率区分分支的测量，且它衡量的是整个分叉后窗口"
+        f"（约 {remain_txt}）累积下来的效果，而不是某一时刻的快照。\n"
+    )
 
     lines.append("\n## 三、分叉后训练诊断（尾段均值）\n")
     lines.append("| seed | 分支 | 有效正则强度 | hinge 激活率 | 排序不一致率 | TD loss | ranking loss |")
@@ -363,36 +458,80 @@ def main() -> None:
                 f"{_fmt(b['sign_disagree'])} | {_fmt(b['loss_td'], 4)} | {_fmt(b['loss_ord'], 4)} |"
             )
 
+    ovmse_beyond_seeds: List[str] = []
     if args.ovmse_ref:
         ref_rows = _eval_rows(_read_jsonl(args.ovmse_ref))
         if ref_rows:
             tail = _tail_mean(ref_rows, "evaluation/win_rate", TAIL_POINTS)
-            bt_hi = max(branch_tails) if branch_tails else None
-            gap = (tail - bt_hi) if (tail is not None and bt_hi is not None) else None
+            per_seed_hi = []
+            for s in seeds:
+                vals = [s["branches"][n]["tail_win"] for n in BRANCHES
+                        if s["branches"][n]["tail_win"] is not None]
+                if vals:
+                    per_seed_hi.append((os.path.basename(s["run_dir"]), max(vals)))
+            bt_hi = max((v for _, v in per_seed_hi), default=None)
+            all_mean = _mean(branch_tails)
+            gap_mean = (tail - all_mean) if (tail is not None and all_mean is not None) else None
+            seed_txt = "、".join(
+                f"{name} {_fmt(v)}（较 OVMSE {'低' if tail >= v else '高'} {_fmt(abs(tail - v))}）"
+                for name, v in per_seed_hi
+            )
+            beyond = [name for name, v in per_seed_hi
+                      if noise95 is not None and tail - v > noise95]
+            within = [name for name, v in per_seed_hi
+                      if noise95 is None or tail - v <= noise95]
+            ovmse_beyond_seeds = beyond
+            if beyond and not within:
+                verdict_txt = "说明三个分支与 OVMSE 的差距不止 ranking loss 一项。"
+            elif beyond:
+                verdict_txt = (
+                    f"说明与 OVMSE 的差距只在 {'、'.join(beyond)} 上超出主指标的不确定范围，"
+                    f"其余 seed 上分支尾段已与 OVMSE 同水平。"
+                )
+            else:
+                verdict_txt = "说明各 seed 上分支尾段与 OVMSE 的差距都在主指标的不确定范围以内。"
             lines.append(
                 f"\n## 四、与 OVMSE 在线运行的对比\n\n"
                 f"作为参照，OVMSE 在同一地图、相同在线设置下，尾段胜率均值为 {_fmt(tail)}"
-                f"（共 {len(ref_rows)} 个评测点，与主指标同口径）。三个分支的尾段胜率最高为 "
-                f"{_fmt(bt_hi)}，比 OVMSE 低约 {_fmt(gap)}，超出主指标自身的不确定范围"
-                f"（约 ±{_fmt(noise95)}）。说明三个分支与 OVMSE 的差距不止 ranking loss 一项。\n"
+                f"（共 {len(ref_rows)} 个评测点，与主指标同口径）。逐 seed 取三个分支的尾段胜率"
+                f"最高值：{seed_txt}；全部 {len(branch_tails)} 个分支尾段的均值为 {_fmt(all_mean)}，"
+                f"较 OVMSE {'低' if (gap_mean or 0) >= 0 else '高'} "
+                f"{_fmt(abs(gap_mean)) if gap_mean is not None else 'n/a'}。"
+                f"主指标的 95% 不确定范围约 ±{_fmt(noise95)}：{verdict_txt}\n"
             )
 
     lines.append("\n## 五、结论\n")
     lines.append(
-        f"\n**{verdict}。** 判定依据：{metric_used}。主指标的 95% 不确定范围约 "
-        f"±{_fmt(noise95)}，远大于其配对差（不超过 {_fmt(tail_abs_max)}），无法判定；"
-        f"按事前约定改用决胜指标，off 与 decay 相对 continue 的配对差为 {_fmt(eval_mu['off'])} "
-        f"与 {_fmt(eval_mu['decay'])}，off 与 decay 之间 {_fmt(eval_mu['off_vs_decay'])}、无法区分。"
+        f"\n**{verdict}。** 判定依据：{metric_used}。按事前约定的多种子判定规则"
+        f"（{n_seeds} 个 seed 方向一致且 640 局配对差均值 ≥ 0.10 记为明显更好；"
+        f"|均值| < 0.05 或方向不一致记为无差异；其余记为趋势不明）："
+        f"640 集终局评估上 off 与 decay 相对 continue 的配对差均值为 "
+        f"{_fmt(eval_mu['off'])} 与 {_fmt(eval_mu['decay'])}"
+        f"（{_direction(eval_diffs['off'])} / {_direction(eval_diffs['decay'])}），"
+        f"off 与 decay 之间 {_fmt(eval_mu['off_vs_decay'])}。"
         f"训练诊断与这一读法一致：continue 支线的 ranking loss 权重全程保持 0.1 不减"
         f"（尾段其损失相对 TD loss 的贡献约 "
         f"{_fmt(cont_reg * 100, 1) if cont_reg is not None else 'n/a'}%），off 从分叉点起、"
         f"decay 逐步不再受其影响；终局评估捕捉的是整个分叉后窗口累积下来的差异。\n"
     )
+    if verdict == _READINGS["same"]:
+        point1 = (
+            "第一，保留 ranking loss 与撤除/衰减在终局评估上无可测差异，"
+            "“无差异”的原因——约束与在线证据不冲突，还是冲突被探索、回放、更新次数等因素抵消——本实验没有分离；"
+        )
+    else:
+        point1 = (
+            "第一，保留 ranking loss 造成终局损失的具体机制——"
+            "是约束与在线证据冲突，还是仅占用优化容量——本实验没有分离；"
+        )
+    point2 = (
+        f"第二，为什么 {'、'.join(ovmse_beyond_seeds)} 上三个分支都追不上 OVMSE（见第四节），"
+        "说明差距还有 ranking loss 之外的原因，需要在探索策略、经验回放、更新次数、表示能力等方向上继续排查。"
+        if ovmse_beyond_seeds else
+        "第二，各 seed 上分支尾段都已与 OVMSE 同水平（见第四节），本实验没有进一步分离 UOT 支线与 OVMSE 的实现差异。"
+    )
     lines.append(
-        "\n**这一结论没有回答的问题**：第一，保留 ranking loss 造成终局损失的具体机制——"
-        "是约束与在线证据冲突，还是仅占用优化容量——本实验没有分离；第二，为什么三个分支都追不上 "
-        "OVMSE（见第四节），说明差距还有 ranking loss 之外的原因，需要在探索策略、经验回放、"
-        "更新次数、表示能力等方向上继续排查。\n"
+        f"\n**这一结论没有回答的问题**：{point1}{point2}\n"
     )
     lines.append(
         "\n## 六、事前约定的结果解读框架\n\n"
@@ -405,7 +544,7 @@ def main() -> None:
     )
     lines.append(
         f"\n## 七、局限\n\n"
-        f"- 单一随机种子：分支间差异在本 seed 上测得清楚，但种子间方差未知，效应量需要更多 seed 确认；\n"
+        f"- {n_seeds} 个随机种子：分支间差异在全部 seed 上按同一协议测量，逐 seed 配对差见第 2.2 节；\n"
         f"- 两个指标精度差异大：结论以 640 集终局评估为准，主指标（每评测点 {eval_eps or '数十'} 集）"
         f"分辨不出 0.1 以下的差异；\n"
         f"- 640 集评估的 95% 半宽约 0.04，0.02 以下的分支间差异（如 off 对 decay）测不出；\n"

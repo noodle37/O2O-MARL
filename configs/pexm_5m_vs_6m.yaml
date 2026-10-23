@@ -1,0 +1,63 @@
+# PEX-M online pilot on 5m_vs_6m. Same online protocol as the UOT temporal run
+# (8 envs, 5000-episode buffer, batch 128, eps 1.0 -> 0.05 over 100k, eval every
+# 10k on 32 episodes, 3M steps, seed 1, same offline start checkpoint), but the
+# trainable arm gets pure TD(lambda): no OVM, no CQL, no UOT ranking, no offline
+# batches. The frozen offline QMIX is a second behaviour arm and a
+# Normal-Inverse-Gamma Thompson selector chooses one arm per episode.
+learner_type: ovmse_paper
+system_name: "pexm 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/pexm_5m_vs_6m
+checkpoint_path: checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1.pt
+log_path: checkpoints/pexm_5m_vs_6m/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  lambda_memory_end: 1.0
+  lambda_anneal_steps: 0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+pexm:
+  offline_checkpoint: checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1.pt
+  min_online: 0.25
+  prior_mu: 0.0
+  prior_kappa: 1.0
+  prior_alpha: 2.0
+  prior_beta: 25.0
+  ckpt_every: 100000

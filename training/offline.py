@@ -9,11 +9,12 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from data.vault_dataset import print_dataset_stats
+from fsr.learner import FSRLearner
 from macal.learner import MaCalQLLearner
 from macflow.learner import MACFlowLearner
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
-from utils.checkpoint import save_qmix_checkpoint
+from utils.checkpoint import load_qmix_checkpoint, save_qmix_checkpoint
 from utils.paths import resolve_path
 
 
@@ -21,6 +22,12 @@ def run_offline(cfg: Dict[str, Any]) -> str:
     dataset = load_vault_dataset(cfg)
     print_dataset_stats(dataset, label="offline")
     learner = build_learner(cfg, dataset)
+    fsr_block = cfg.get("fsr") or {}
+    init_from = fsr_block.get("init_from_qmix") or cfg.get("checkpoint_path")
+    if isinstance(learner, FSRLearner) and fsr_block.get("init_from_qmix"):
+        path = resolve_path(init_from)
+        load_qmix_checkpoint(str(path), learner, load_optimizer=False)
+        print(f"FSR loaded QMIX base from {path}")
     count_updates = bool(cfg.get("count_updates", False))
     if getattr(learner, "moderate_lambda", False):
         cache = resolve_path(cfg.get("behaviour_cache_dir"))
@@ -55,6 +62,8 @@ def run_offline(cfg: Dict[str, Any]) -> str:
         if isinstance(learner, MaCalQLLearner)
         else "mac_flow"
         if isinstance(learner, MACFlowLearner)
+        else "fsr"
+        if isinstance(learner, FSRLearner)
         else "ovmse_paper"
     )
 
@@ -93,6 +102,13 @@ def run_offline(cfg: Dict[str, Any]) -> str:
             )
         elif isinstance(learner, MACFlowLearner):
             logs = learner.train_on_batch(batch, t_env=t_env)
+        elif isinstance(learner, FSRLearner):
+            logs = learner.train_on_batch(
+                batch,
+                cql_weight=learner.cql_weight,
+                t_env=t_env,
+                episode_delta=episode_delta,
+            )
         else:
             logs = learner.train_on_batch(
                 batch,
@@ -130,6 +146,15 @@ def run_offline(cfg: Dict[str, Any]) -> str:
                     },
                     default_name=f"{ckpt_prefix}_seed{cfg['seed']}_best.pt",
                 )
+
+    if isinstance(learner, FSRLearner):
+        calib = learner.calibrate_support(
+            dataset,
+            n_batches=int(fsr_block.get("calib_batches", 8)),
+            batch_size=int(cfg.get("batch_size", 128)),
+            seed=int(cfg["seed"]),
+        )
+        logger.write({**calib, "t_env": t_env, "phase": "fsr_calibrate"}, force=True)
 
     final_path = ""
     if ckpt_dir:

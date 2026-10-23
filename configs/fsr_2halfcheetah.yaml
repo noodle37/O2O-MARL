@@ -1,0 +1,79 @@
+# FSR feasibility on 2halfcheetah (discrete 27-way torque bins).
+# Same recipe as 2s3z: reuse the existing OVMSE QMIX, train/calibrate the flow,
+# then online FSR with a pure TD target.
+learner_type: fsr
+system_name: "fsr 2halfcheetah"
+seed: 1
+wandb_project: og-marl
+phase: offline
+count_updates: true
+t_max: 8000
+buffer_size: 5000
+batch_size: 32
+batch_size_run: 2
+test_interval: 4000
+num_eval_episodes: 8
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/fsr_2halfcheetah
+checkpoint_path: checkpoints/fsr_2halfcheetah/fsr_seed1.pt
+log_path: checkpoints/fsr_2halfcheetah/offline.jsonl
+
+task:
+  source: og_marl
+  env: mamujoco
+  scenario: 2halfcheetah
+  dataset: Good
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 50
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  softmax_temp: 5
+  num_ood_actions: 100
+  online_cql_weight: 0.0
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+
+fsr:
+  init_from_qmix: checkpoints/ovmse_2halfcheetah_offline/ovmse_paper_seed1_best.pt
+  shared_flow: false
+  shape_critic: true
+  shape_weight: 0.1
+  flow_hidden: [128, 128, 128]
+  encoder_hidden: 64
+  flow_lr: 0.0003
+  flow_steps: 6
+  score_t: 0.9
+  calib_quantile: 0.10
+  calib_batches: 4
+  mix_fn: linear
+  mix_max: 0.5
+  prior_eta: 0.1
+  visit_scale: 50.0
+  rotate_explore: true
+  rotate_period: 1
+  logp_max_rows: 1024
+  shape_max_rows: 256
+
+online:
+  t_max: 400000
+  test_interval: 100000
+  use_ovm: false
+  log_path: checkpoints/fsr_2halfcheetah/online.jsonl
+
+transfer:
+  mode: fsr

@@ -1,0 +1,66 @@
+# Paper-protocol Q diagnostics, 5m_vs_6m Medium, O2O with OVM enabled.
+# Same offline checkpoint and budget as qdiag_5m_vs_6m_off.
+system_name: "qdiag 5m_vs_6m on"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 300000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 5000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/qdiag_20261020/5m_vs_6m_on
+behaviour_cache_dir: checkpoints/ovmse_paper_5m_vs_6m/behaviour
+checkpoint_path: checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1_best.pt
+log_path: checkpoints/qdiag_20261020/5m_vs_6m_on/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 50.0
+  softmax_temp: 0.5
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  online_cql_weight: 0.0
+  mixing_ratio: 0.1
+  lambda_memory_end: 0.1
+  lambda_anneal_steps: 200000
+  use_ovm: true
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  ovm_diag_train_stats: true
+  ovm_diag_stride: 4
+
+online:
+  t_max: 300000
+  test_interval: 5000
+  use_ovm: true
+  log_path: checkpoints/qdiag_20261020/5m_vs_6m_on/online.jsonl
+
+transfer:
+  mode: ovmse
+
+ovm_diag:
+  buffer_snapshot_episodes: 0
+  ckpt_every: 25000
+  train_stats_stride: 4

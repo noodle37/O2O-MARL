@@ -62,6 +62,11 @@ class EvalPolicyMixin:
             rnn_state = state["rnn"]
             last_actions = state["last"]
         epsilon_dec = 0.0 if eps <= 0.0 else eps / self.n_agents
+        # Sequential exploration (OVMSE paper style): at each step exactly one
+        # agent explores with the scheduled epsilon, all others act greedily.
+        # With eps <= 0 this degenerates to the plain greedy policy.
+        sequential = bool(getattr(self, "sequential_explore", False)) and eps > 0.0
+        explorer = int(np.random.randint(self.n_agents)) if sequential else -1
         actions = {}
         chosen_q: List[float] = []
         offline_chosen_q: List[float] = []
@@ -88,7 +93,11 @@ class EvalPolicyMixin:
             q, rnn_state[agent] = self.q_network(obs_in, rnn_state.get(agent))
             legal = torch.from_numpy(legals[agent]).bool().to(self.device)
             q = q[0].masked_fill(~legal, -1e9)
-            if np.random.rand() < epsilon_dec:
+            if sequential:
+                explore_here = i == explorer and np.random.rand() < eps
+            else:
+                explore_here = np.random.rand() < epsilon_dec
+            if explore_here:
                 legal_idx = torch.nonzero(legal, as_tuple=False).squeeze(-1)
                 a = int(legal_idx[torch.randint(legal_idx.numel(), (1,))].item())
             else:

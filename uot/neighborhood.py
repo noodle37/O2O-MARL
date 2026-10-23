@@ -88,11 +88,30 @@ def _agent_q(bar_q: torch.Tensor, agent: int) -> torch.Tensor:
     return bar_q[:, :, agent, :]
 
 
+def supported(support: RecordedJoints, joints: torch.Tensor, mode: str) -> torch.Tensor:
+    """Compatibility test used to build the candidate pool.
+
+    ``joint`` is the original UOT S_off test. ``marginal`` only asks that each
+    agent's action was recorded for that agent. ``state`` and ``none`` place no
+    action-level constraint on the pool (state support is a loss weight applied
+    later by the learner, not a candidate filter).
+    """
+    name = str(mode).lower()
+    if name == "joint":
+        return support.contains(joints)
+    if name == "marginal":
+        return support.contains_marginal(joints)
+    if name in ("state", "none"):
+        return torch.ones(joints.shape[:-1], dtype=torch.bool, device=joints.device)
+    raise ValueError(f"unknown candidate support mode {mode!r}")
+
+
 def hamming1(
     anchors: torch.Tensor,
     avail: torch.Tensor,
     bar_q: torch.Tensor,
     support: RecordedJoints,
+    candidate_support: str = "joint",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Recorded Hamming-1 neighbors of each anchor. Any agent may differ."""
     n_anc, b, t, n = anchors.shape
@@ -105,7 +124,7 @@ def hamming1(
         cand = cand.reshape(n_anc * n_act, b, t, n)
         old_i = anchors[..., i].unsqueeze(1).expand(n_anc, n_act, b, t).reshape(n_anc * n_act, b, t)
         changed = cand[..., i] != old_i
-        valid = changed & joints_available(cand, avail) & support.contains(cand)
+        valid = changed & joints_available(cand, avail) & supported(support, cand, candidate_support)
         q_all = _agent_q(bar_q, i).unsqueeze(0).expand(n_anc, -1, -1, -1)
         q_new = q_all.permute(0, 3, 1, 2).reshape(n_anc * n_act, b, t)
         q_old = torch.gather(
@@ -125,6 +144,7 @@ def hamming2(
     support: RecordedJoints,
     i: int,
     j: int,
+    candidate_support: str = "joint",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Recorded Hamming-2 neighbors that differ in agents i and j."""
     n_anc, b, t, n = anchors.shape
@@ -139,7 +159,7 @@ def hamming2(
     old_i = old_i.reshape(n_anc * n_act * n_act, b, t)
     old_j = old_j.reshape(n_anc * n_act * n_act, b, t)
     changed = (cand[..., i] != old_i) & (cand[..., j] != old_j)
-    valid = changed & joints_available(cand, avail) & support.contains(cand)
+    valid = changed & joints_available(cand, avail) & supported(support, cand, candidate_support)
     q_i = _agent_q(bar_q, i)
     q_j = _agent_q(bar_q, j)
     qi_a = q_i.permute(2, 0, 1)
@@ -193,19 +213,27 @@ def build_recorded_neighborhood(
     *,
     k: int,
     max_hamming: int,
+    candidate_support: str = "joint",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return cand [K,B,T,N] and valid [K,B,T]. Every valid joint is in S_off."""
+    """Return cand [K,B,T,N] and valid [K,B,T].
+
+    ``candidate_support`` controls which joints enter the pool: exact recorded
+    tuples (joint), per-agent-marginal combinations (marginal), or every legal
+    joint (state/none).
+    """
     live_g = product_greedy(live_q, avail)
     bar_g = product_greedy(bar_q, avail)
     exec_u = executed.long()
     if exec_u.dim() == live_g.dim() + 1:
         exec_u = exec_u.squeeze(-1)
     anchors = torch.stack([bar_g, live_g, exec_u], dim=0)
-    h0_valid = joints_available(anchors, avail) & support.contains(anchors)
+    h0_valid = joints_available(anchors, avail) & supported(support, anchors, candidate_support)
     h0_score = torch.ones(anchors.shape[:-1], device=anchors.device) + 1.0e6
     joints, valid, scores = anchors, h0_valid, h0_score
     if max_hamming >= 1:
-        h1_j, h1_v, h1_s = hamming1(anchors, avail, bar_q, support)
+        h1_j, h1_v, h1_s = hamming1(
+            anchors, avail, bar_q, support, candidate_support=candidate_support
+        )
         joints = torch.cat([joints, h1_j], dim=0)
         valid = torch.cat([valid, h1_v], dim=0)
         scores = torch.cat([scores, h1_s], dim=0)
@@ -218,7 +246,9 @@ def build_recorded_neighborhood(
             for j in range(i + 1, n_agents):
                 if bool((nfill >= k).all().item()):
                     break
-                h2_j, h2_v, h2_s = hamming2(anchors, avail, bar_q, support, i, j)
+                h2_j, h2_v, h2_s = hamming2(
+                    anchors, avail, bar_q, support, i, j, candidate_support=candidate_support
+                )
                 selected, sel_valid, nfill = pack_unique_topk(
                     torch.cat([selected, h2_j], dim=0),
                     torch.cat([sel_valid, h2_v], dim=0),

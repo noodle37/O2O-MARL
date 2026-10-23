@@ -1,0 +1,17 @@
+# H3 policy set: 13 checkpoints, one per line.
+# Columns: tag family t_env path
+# t_env is the step count recorded in the checkpoint's `extra`; the analysis
+# script re-reads it when present and only uses this column for ordering.
+teacher_best    offline  9159389  checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1_best.pt
+teacher_final   offline  10002211 checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1.pt
+uot_t500k       uot      500156   checkpoints/uot_temporal_5m_vs_6m/periodic/ovm_diag_ckpt_t500000.pt
+uot_t1m         uot      1000208  checkpoints/uot_temporal_5m_vs_6m/periodic/ovm_diag_ckpt_t1000000.pt
+uot_t1.5m       uot      1500185  checkpoints/uot_temporal_5m_vs_6m/periodic/ovm_diag_ckpt_t1500000.pt
+uot_t2m         uot      2000148  checkpoints/uot_temporal_5m_vs_6m/periodic/ovm_diag_ckpt_t2000000.pt
+uot_t2.5m       uot      2500190  checkpoints/uot_temporal_5m_vs_6m/periodic/ovm_diag_ckpt_t2500000.pt
+uot_t3m         uot      3000174  checkpoints/uot_temporal_5m_vs_6m/periodic/ovm_diag_ckpt_t3000000.pt
+fork_t1m        fork     1009049  checkpoints/uot_fork_5m_vs_6m_seed1_formal/fork_snapshot_main_t1009049.pt
+fork_continue   fork     3000060  checkpoints/uot_fork_5m_vs_6m_seed1_formal/uot_online_fork_resume_continue_seed1.pt
+fork_off        fork     3000027  checkpoints/uot_fork_5m_vs_6m_seed1_formal/uot_online_fork_resume_off_seed1.pt
+fork_decay      fork     3000096  checkpoints/uot_fork_5m_vs_6m_seed1_formal/uot_online_fork_resume_decay_seed1.pt
+ovmse_online    ovmse    3000050  checkpoints/ovmse_batch_20261014/5m_vs_6m_online/ovmse_paper_online_ovmse_seed1.pt

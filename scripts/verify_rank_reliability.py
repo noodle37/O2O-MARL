@@ -163,10 +163,22 @@ def episode_done(terminal, trunc) -> bool:
 # --------------------------------------------------------------------------- #
 # Base rollout: record per-step frozen Q, legal, state, action, unit counts.
 # --------------------------------------------------------------------------- #
-def base_rollout(env, learner, wave: str, eps: float, rng: np.random.Generator) -> dict:
+def base_rollout(
+    env, learner, wave: str, eps: float, rng: np.random.Generator, q_evaluator=None
+) -> dict:
+    """Roll out under `learner`'s (eps-)greedy policy.
+
+    Per-step Q is recorded from `q_evaluator`; when it is None (default) the
+    actor and the evaluated critic are the same network, which is the task-2
+    behaviour. The temporal-evolution measurement passes the frozen teacher as
+    `q_evaluator` while rolling out an online continuation policy, so states
+    come from that policy but are still ranked by the frozen critic.
+    """
+    q_net = learner if q_evaluator is None else q_evaluator
     names = _agent_names(learner.n_agents)
     n_actions = learner.n_actions
     rnn = _new_hidden(learner)
+    rnn_eval = rnn if q_evaluator is None else _new_hidden(q_net)
     last: dict[str, int] = {}
     obs, info = reset_env(env)
     steps = []
@@ -176,8 +188,12 @@ def base_rollout(env, learner, wave: str, eps: float, rng: np.random.Generator) 
         state = np.asarray(info["state"], dtype=np.float32).copy()
         legal = _legal_tensor(info["legals"], names, n_actions, learner.device)
         with torch.inference_mode():
-            q = _forward_qs(learner, obs, rnn, last)  # [N,A]; updates rnn
-        greedy = q.masked_fill(~legal, -1e9).argmax(dim=-1)
+            q = _forward_qs(q_net, obs, rnn_eval, last)  # [N,A]; updates rnn_eval
+            if q_evaluator is None:
+                greedy = q.masked_fill(~legal, -1e9).argmax(dim=-1)
+            else:
+                q_act = _forward_qs(learner, obs, rnn, last)  # updates rnn
+                greedy = q_act.masked_fill(~legal, -1e9).argmax(dim=-1)
         if wave == "epsgreedy" and eps > 0 and rng.random() < eps:
             chosen = random_legal(legal, rng)
         else:

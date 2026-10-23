@@ -1,0 +1,58 @@
+# Problem-validation exp 1 -- offline pretraining for the 2halfcheetah Medium map.
+#
+# The 5m_vs_6m map already has its shared offline checkpoint
+# (checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt), so
+# only this map needs pretraining.  Everything except the dataset is copied from
+# configs/2halfcheetah.yaml so the protocol matches the OVMSE-paper recipe that
+# produced the 5m checkpoint: CFCQL (cql_weight 50, moderate lambda), 10M filled
+# steps of pretraining budget expressed as 3.84e8 (the same constant the paper
+# config uses), behaviour prior cached for the online conservative arm.
+system_name: "pv offline 2halfcheetah medium"
+seed: 1
+wandb_project: og-marl
+phase: offline
+t_max: 384000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 2
+test_interval: 12800000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/pv_exp1_offline/2halfcheetah_medium
+behaviour_cache_dir: checkpoints/pv_exp1_offline/2halfcheetah_medium/behaviour
+checkpoint_path: checkpoints/pv_exp1_offline/2halfcheetah_medium/ovmse_paper_seed1_best.pt
+log_path: checkpoints/pv_exp1_offline/2halfcheetah_medium/offline.jsonl
+
+task:
+  source: og_marl
+  env: mamujoco
+  scenario: 2halfcheetah
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 50
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 50.0
+  softmax_temp: 5
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 12800000
+  online_cql_weight: 0.0
+  mixing_ratio: 0.1
+  lambda_memory_end: 0.1
+  lambda_anneal_steps: 7680000
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu

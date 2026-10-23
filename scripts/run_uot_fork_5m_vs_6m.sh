@@ -58,9 +58,11 @@ log() { echo "=== [$(date '+%F %T')] $* ===" | tee -a "$SEED_LOG"; }
 
 # The offline checkpoint each seed's parent starts from (same file the plain UOT
 # run uses, so the pre-fork curve stays comparable with existing UOT runs).
+# Every seed uses the FINAL checkpoint of a complete 10M-step offline run, so the
+# three seeds are started from the same kind of artefact. (seed 2 previously used
+# a 902k-step truncated "_best" file; that run was abandoned and re-done properly.)
 case "$SEED" in
   1) OFFLINE_CKPT="checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1.pt" ;;
-  2) OFFLINE_CKPT="checkpoints/ovmse_paper_5m_vs_6m_seed2/ovmse_paper_seed2_best.pt" ;;
   *) OFFLINE_CKPT="checkpoints/ovmse_paper_5m_vs_6m_seed${SEED}/ovmse_paper_seed${SEED}.pt" ;;
 esac
 if [[ ! -f "$OFFLINE_CKPT" ]]; then

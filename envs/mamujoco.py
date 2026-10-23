@@ -56,6 +56,16 @@ class MAMuJoCo(BaseEnvironment):
     def __init__(self, scenario: str, seed: Optional[int] = 42):
         env_args = get_mamujoco_args(scenario)
         self._environment = MujocoMulti(env_args=env_args, seed=seed)
+        # MujocoMulti.seed is a no-op and its base only reads env_args["seed"],
+        # which get_mamujoco_args never sets, so resets would otherwise draw
+        # initial states from an unseeded Gym RNG. Newer Gym mujoco envs also
+        # dropped Env.seed, so seed the reset RNG directly.
+        if seed is not None:
+            rng = getattr(self._environment.env, "np_random", None)
+            if isinstance(rng, np.random.Generator):
+                self._environment.env.np_random = np.random.default_rng(int(seed))
+            elif rng is not None:
+                rng.seed(int(seed))
 
         self.agents = [f"agent_{n}" for n in range(self._environment.n_agents)]
         self.num_actions = self._environment.n_actions

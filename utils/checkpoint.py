@@ -44,6 +44,10 @@ def save_qmix_checkpoint(
             "target_mixer": system.target_mixer.state_dict(),
             "training_step_ctr": int(getattr(system, "training_step_ctr", 0)),
         }
+        if hasattr(system, "state_dicts"):
+            for key, value in system.state_dicts().items():
+                if key not in payload:
+                    payload[key] = value
     if getattr(system, "coord", None) is not None:
         payload["coord"] = system.coord.state_dict()
         payload["target_coord"] = system.target_coord.state_dict()
@@ -258,5 +262,9 @@ def load_qmix_checkpoint(
             system.optimizer.load_state_dict(ckpt["optimizer"])
         if "training_step_ctr" in ckpt:
             system.training_step_ctr = int(ckpt["training_step_ctr"])
+        if hasattr(system, "load_fsr_state"):
+            system.load_fsr_state(ckpt)
+        if hasattr(system, "load_offline_state"):
+            system.load_offline_state(ckpt)
     print(f"Loaded QMIX checkpoint from {path}")
     return ckpt

@@ -1,0 +1,70 @@
+# Shared config for the matched UOT / no-ranking / OVMSE protocol audit.
+# Every arm starts from the same offline checkpoint chosen by Step 0 and uses
+# the same online recipe. The driver changes only the arm switches:
+#   A uot ranking, OVM off, mixing 0.0
+#   B uot eta=0 (vanilla O2O), OVM off, mixing 0.0
+#   C OVMSE, OVM on, mixing 0.1
+#   D OVM only, OVM on, mixing 0.0
+#   E mixing only, OVM off, mixing 0.1
+learner_type: uot
+system_name: "matched protocol 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/matched_protocol_20261020/placeholder
+checkpoint_path: checkpoints/ovmse_paper_5m_vs_6m/ovmse_paper_seed1.pt
+log_path: checkpoints/matched_protocol_20261020/placeholder/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  grad_norm_clip: 10.0
+  target_update_interval: 200
+  add_agent_id_to_obs: true
+  uot_eta: 0.1
+  uot_delta: 0.1
+  uot_margin: 0.1
+  uot_k: 8
+  uot_max_hamming: 2
+  uot_ranking_scope: joint
+  uot_support_mode: joint
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  mixing_ratio: 0.0
+  lambda_memory_end: 0.1
+  lambda_anneal_steps: 200000
+  use_ovm: false
+  ovm_diag_train_stats: true
+  ovm_diag_stride: 4
+  online_cql_weight: 0.0
+  cql_weight: 0.0
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+
+transfer:
+  mode: none
+
+ovm_diag:
+  ckpt_every: 500000

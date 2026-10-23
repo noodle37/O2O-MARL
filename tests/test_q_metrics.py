@@ -38,8 +38,8 @@ def test_residual_sign_disagree_frac():
 def test_flat_q_hides_from_rank_but_shows_up_as_bias():
     rewards = [0.0, 0.0, 0.0, 20.0]
     logs = summarize_q_traces(
-        [{"q": np.full(4, 20.0), "reward": np.asarray(rewards)}],
-        gamma=1.0,
+        [{"q": np.full(4, 30.0), "reward": np.asarray(rewards)}],
+        gamma=0.5,
     )
     assert logs["evaluation/q_bias"] > 0.0
     assert logs["evaluation/q_overestimate_rate"] == 1.0

@@ -16,7 +16,7 @@ from qmix.core import QMIXBase
 from qmix.networks import MarlcRNN, QMixer
 from uot.hinge import ordinal_hinge
 from uot.neighborhood import build_recorded_neighborhood
-from uot.support import RecordedJoints
+from uot.support import RecordedJoints, StateSupport
 
 
 class UOTLearner(QMIXBase):
@@ -49,6 +49,9 @@ class UOTLearner(QMIXBase):
         n_candidates: int = 8,
         max_hamming: int = 2,
         eps_min: float = 0.05,
+        ranking_scope: str = "joint",
+        support_mode: str = "joint",
+        state_support: Optional[StateSupport] = None,
         device: str = "cuda",
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -72,6 +75,20 @@ class UOTLearner(QMIXBase):
         self.eps_min = eps_min
         self.use_ovm = False
         self.support = support
+        self.ranking_scope = str(ranking_scope).lower()
+        if self.ranking_scope not in ("joint", "agent"):
+            raise ValueError(f"unknown ranking_scope {ranking_scope!r}")
+        self.support_mode = str(support_mode).lower()
+        if self.support_mode not in ("joint", "marginal", "state", "none"):
+            raise ValueError(f"unknown support_mode {support_mode!r}")
+        self.state_support = state_support
+        if self.support_mode == "state" and self.state_support is None:
+            raise ValueError("support_mode='state' requires a calibrated StateSupport")
+        self.checkpoint_stem = (
+            f"uot_{self.ranking_scope}_{self.support_mode}"
+            if (self.ranking_scope != "joint" or self.support_mode != "joint")
+            else "uot"
+        )
 
         self.obs_dim = obs_dim
         obs_in = obs_dim + n_actions
@@ -127,6 +144,109 @@ class UOTLearner(QMIXBase):
         taken = torch.gather(q_rep, dim=3, index=idx).squeeze(-1)
         st = state.unsqueeze(0).expand(k, -1, -1, -1).reshape(k * b, t, state.shape[-1])
         return mixer(taken, st).view(k, b, t, -1)
+
+    def _agent_ranking_loss(
+        self,
+        live_q: torch.Tensor,
+        teacher_q: torch.Tensor,
+        avail: torch.Tensor,
+        mask_bt: torch.Tensor,
+    ) -> tuple[torch.Tensor, Dict[str, float]]:
+        """Per-agent pairwise ordinal distillation.
+
+        Same hinge form, margin, delta and coefficient as the joint loss, but
+        pairs are drawn within each agent's own action set. The teacher's
+        per-agent Q ordering is the only transferred signal; no mixer and no
+        joint candidate pool enter this loss.
+        """
+        teacher = teacher_q.detach()
+        n_actions = live_q.shape[-1]
+        zeros = live_q.new_zeros(())
+        loss_sum = zeros
+        keep_sum = zeros
+        act_sum = zeros
+        disagree_sum = zeros
+        for a in range(n_actions):
+            for b in range(a + 1, n_actions):
+                legal = avail[..., a] & avail[..., b] & mask_bt.unsqueeze(-1)
+                dbar = teacher[..., a] - teacher[..., b]
+                keep = legal & (dbar.abs() >= self.margin)
+                keep_f = keep.float()
+                n_keep = float(keep_f.sum().item())
+                if n_keep < 1:
+                    continue
+                sign = torch.sign(dbar).detach()
+                dlive = live_q[..., a] - live_q[..., b]
+                hinge = torch.relu(self.delta - sign * dlive)
+                loss_sum = loss_sum + (hinge * keep_f).sum()
+                keep_sum = keep_sum + keep_f.sum()
+                act_sum = act_sum + ((hinge > 0) & keep).float().sum()
+                disagree_sum = disagree_sum + (
+                    keep & (torch.sign(dlive.detach()) != sign)
+                ).float().sum()
+        stats = {
+            "pad_n_pairs": float(keep_sum.item()),
+            "pad_hinge_rate": 0.0,
+            "pad_sign_disagree": 0.0,
+        }
+        if float(keep_sum.item()) < 1:
+            return zeros, stats
+        stats["pad_hinge_rate"] = float((act_sum / keep_sum).item())
+        stats["pad_sign_disagree"] = float((disagree_sum / keep_sum).item())
+        return loss_sum / keep_sum, stats
+
+    def _ranking_loss(
+        self,
+        mac_out: torch.Tensor,
+        bar_out: torch.Tensor,
+        avail: torch.Tensor,
+        actions: torch.Tensor,
+        states: torch.Tensor,
+        mask: torch.Tensor,
+        mask_bt: torch.Tensor,
+    ) -> tuple[torch.Tensor, Dict[str, float]]:
+        """Joint recorded-neighbourhood hinge or per-agent distillation."""
+        if self.ranking_scope == "agent":
+            return self._agent_ranking_loss(
+                mac_out[:, :-1],
+                bar_out[:, :-1],
+                avail[:, :-1],
+                mask_bt,
+            )
+
+        cand, valid = build_recorded_neighborhood(
+            mac_out[:, :-1],
+            bar_out[:, :-1],
+            avail[:, :-1],
+            actions[:, :-1],
+            self.support,
+            k=self.n_candidates,
+            max_hamming=self.max_hamming,
+            candidate_support=self.support_mode,
+        )
+        q_live = self._qtot_candidates(self.mixer, mac_out[:, :-1], cand, states[:, :-1])
+        with torch.no_grad():
+            q_bar = self._qtot_candidates(
+                self.frozen_mixer, bar_out[:, :-1], cand, states[:, :-1]
+            )
+        weight = None
+        stats: Dict[str, float] = {}
+        if self.support_mode == "state" and self.state_support is not None:
+            weight = self.state_support.weights(states[:, :-1])
+            stats["uot_state_support_mean"] = float(weight.mean().item())
+            stats["uot_state_support_frac"] = float((weight > 0.5).float().mean().item())
+        loss, hinge_stats = ordinal_hinge(
+            q_live,
+            q_bar,
+            cand,
+            valid,
+            mask.squeeze(-1) > 0,
+            delta=self.delta,
+            margin=self.margin,
+            weight=weight,
+        )
+        stats.update(hinge_stats)
+        return loss, stats
 
     def _masked_ood_frac(self, joints: torch.Tensor, mask: torch.Tensor) -> float:
         actions = joints.long()
@@ -228,31 +348,16 @@ class UOTLearner(QMIXBase):
             with torch.set_grad_enabled(eta_now > 0.0):
                 with torch.no_grad():
                     bar_out = self._forward_net(self.frozen_q_network, batch)
-                cand, valid = build_recorded_neighborhood(
-                    mac_out[:, :-1],
-                    bar_out[:, :-1],
-                    avail[:, :-1],
-                    actions[:, :-1],
-                    self.support,
-                    k=self.n_candidates,
-                    max_hamming=self.max_hamming,
-                )
-                q_live = self._qtot_candidates(
-                    self.mixer, mac_out[:, :-1], cand, states[:, :-1]
-                )
-                with torch.no_grad():
-                    q_bar = self._qtot_candidates(
-                        self.frozen_mixer, bar_out[:, :-1], cand, states[:, :-1]
-                    )
-                loss_ord, ord_stats = ordinal_hinge(
-                    q_live,
-                    q_bar,
-                    cand,
-                    valid,
+                loss_ord, rank_stats = self._ranking_loss(
+                    mac_out,
+                    bar_out,
+                    avail,
+                    actions,
+                    states,
+                    mask,
                     mask.squeeze(-1) > 0,
-                    delta=self.delta,
-                    margin=self.margin,
                 )
+                ord_stats.update(rank_stats)
         loss = loss_td + eta_now * loss_ord
         reg_strength = eta_now * float(loss_ord.detach()) / max(float(loss_td.detach()), 1e-8)
 
@@ -287,6 +392,10 @@ class UOTLearner(QMIXBase):
             "n_soff": float(len(self.support)),
             "exec_ood_frac": self._masked_ood_frac(actions[:, :-1], mask),
             "unres_backup_ood_frac": self._masked_ood_frac(max_actions[:, :-1], mask),
+            "uot_ranking_scope_agent": float(self.ranking_scope == "agent"),
+            "uot_support_mode": float(
+                {"joint": 0.0, "marginal": 1.0, "state": 2.0, "none": 3.0}[self.support_mode]
+            ),
         }
         logs.update(ord_stats)
         self.last_diag = {
@@ -297,5 +406,15 @@ class UOTLearner(QMIXBase):
             "loss_td": float(loss_td.detach().item()),
             "loss_ord": float(loss_ord.detach().item()),
             "reg_strength": float(reg_strength),
+            "uot_cand_in_frac": float(ord_stats.get("uot_cand_in_frac", 0.0)),
         }
+        for key in (
+            "uot_state_support_mean",
+            "uot_state_support_frac",
+            "pad_n_pairs",
+            "pad_hinge_rate",
+            "pad_sign_disagree",
+        ):
+            if key in ord_stats:
+                self.last_diag[key] = float(ord_stats[key])
         return logs
