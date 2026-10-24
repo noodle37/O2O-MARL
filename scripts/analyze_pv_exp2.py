@@ -109,27 +109,73 @@ def bin_2a_by_deviation(exp2a: dict, thresholds: dict) -> Dict[str, dict]:
 def render_table2(
     exp2a: dict, exp2b: dict, validity: Dict[str, dict]
 ) -> str:
-    lines = [
-        "| D 分箱 | 在线状态占比 | ρ (N) | ρ (R) | 偏差 (N) | 偏差 (R) | ḡ | Ī | 记忆触发率 | 记忆更接近 G |",
-        "|---|---|---|---|---|---|---|---|---|---|",
-    ]
     pooled = (exp2b or {}).get("pooled", {})
     bins = pooled.get("bins", {})
-    random_summary = exp2a.get("random", {})
-    # Natural-shift rho/bias are pooled across checkpoints in the 2a output.
-    natural_rhos = _finite(
-        [s.get("spearman_rho", float("nan")) for s in exp2a.get("natural", {}).values() for s in [s] if isinstance(s, dict)]
-    )
-    for name in BINS:
-        cell = bins.get(name, {})
-        share = cell.get("share", float("nan"))
-        err = cell.get("mean_abs_err", float("nan"))
-        trig = cell.get("trigger_rate", float("nan"))
-        closer = cell.get("memory_closer_rate", float("nan"))
-        lines.append(
-            f"| {BIN_LABELS[name]} | {share:.3f} | n/a | n/a | n/a | n/a | n/a | n/a | "
-            f"{trig:.3f} | {closer:.3f} |"
+    fe = (exp2b or {}).get("fixed_effects", {})
+    floor = fe.get("lambda_floor", {})
+    rel_floor = fe.get("relative_error_lambda_floor", {})
+    lines: List[str] = []
+    if floor.get("bins"):
+        nulls = floor.get("shuffled_d", {}).get("null_bin_mean") or []
+        lines.extend(
+            [
+                "| D 分箱 | 状态占比 | 误差（固定效应后）[95% CI] | 相对误差 | 触发率 | P(更接近 G \\| 触发) | 打乱 D 后的误差 |",
+                "|---|---:|---|---:|---:|---:|---:|",
+            ]
         )
+        for idx, name in enumerate(BINS):
+            cell = floor["bins"].get(name, {})
+            rcell = rel_floor.get("bins", {}).get(name, {})
+            pcell = bins.get(name, {})
+            band = cell.get("ci", [float("nan")] * 2)
+            null_value = nulls[idx] if idx < len(nulls) else float("nan")
+            lines.append(
+                f"| {BIN_LABELS[name]} | {cell.get('share', float('nan')):.3f} | "
+                f"{cell.get('mean', float('nan')):.3f} "
+                f"[{band[0]:.3f}, {band[1]:.3f}] | "
+                f"{rcell.get('mean', float('nan')):+.3f} | "
+                f"{pcell.get('trigger_rate', float('nan')):.3f} | "
+                f"{pcell.get('closer_given_trigger', float('nan')):.3f} | "
+                f"{null_value:.3f} |"
+            )
+        hi = floor.get("hi_minus_low", {})
+        band = hi.get("ci", [float("nan")] * 2)
+        lines.extend(
+            [
+                "",
+                f"固定效应后高偏离（$>q_{{95}}$）减低偏离（$\\le q_{{50}}$）的误差差："
+                f"**{hi.get('value', float('nan')):.3f}** [{band[0]:.3f}, {band[1]:.3f}]；"
+                f"四箱单调：{'是' if floor.get('monotone') else '否'}。",
+            ]
+        )
+        strata = floor.get("novelty_strata", {})
+        if strata:
+            parts = [
+                f"{key} {val.get('value', float('nan')):.3f} "
+                f"[{val.get('ci', [float('nan')] * 2)[0]:.3f}, {val.get('ci', [float('nan')] * 2)[1]:.3f}]"
+                for key, val in strata.items()
+            ]
+            lines.append("新颖度三档内的高减低差：" + "；".join(parts) + "。")
+        checks = (exp2b or {}).get("rule_checks", {})
+        if checks:
+            lines.append(
+                "规则判定：" + "，".join(f"{k}={v}" for k, v in checks.items()) + "。"
+            )
+    else:
+        lines.extend(
+            [
+                "| D 分箱 | 在线状态占比 | 误差 | 触发率 | 记忆更接近 G |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for name in BINS:
+            cell = bins.get(name, {})
+            lines.append(
+                f"| {BIN_LABELS[name]} | {cell.get('share', float('nan')):.3f} | "
+                f"{cell.get('mean_abs_err', float('nan')):.3f} | "
+                f"{cell.get('trigger_rate', float('nan')):.3f} | "
+                f"{cell.get('memory_closer_rate', float('nan')):.3f} |"
+            )
     mismatch = pooled.get("mismatch", {})
     lines.append("")
     lines.append("表下另列两项错配率：")
@@ -149,22 +195,39 @@ def decide(exp2a: dict, exp2b: dict, validity: Dict[str, dict]) -> Dict[str, str
     out: Dict[str, str] = {}
     pooled = (exp2b or {}).get("pooled", {})
     bins = pooled.get("bins", {})
-    low = bins.get("<=q50", {}).get("mean_abs_err", float("nan"))
-    high = bins.get(">q99", {}).get("mean_abs_err", float("nan"))
-    if low == low and high == high:
-        if high > low:
+    floor = (exp2b or {}).get("fixed_effects", {}).get("lambda_floor", {})
+    hi = floor.get("hi_minus_low", {})
+    if hi.get("value") == hi.get("value"):
+        value = float(hi["value"])
+        low_ci, high_ci = hi.get("ci", [float("nan")] * 2)
+        if low_ci > 0:
             out["J4"] = (
-                f"最高偏离箱的离线价值误差 {high:.3f} 高于最低箱的 {low:.3f}："
+                f"λ 下限区段内，固定效应后高偏离箱的离线价值误差比低偏离箱高 "
+                f"{value:.3f}（95% CI [{low_ci:.3f}, {high_ci:.3f}]）："
                 "价值知识的有效性随同伴偏离而下降。"
+            )
+        elif high_ci < 0:
+            out["J4"] = (
+                f"λ 下限区段内，固定效应后高偏离箱的误差反而低 "
+                f"{-value:.3f}（95% CI [{low_ci:.3f}, {high_ci:.3f}]）："
+                "方向与假设相反，不能按同伴偏离度决定价值知识是否参与更新。"
             )
         else:
             out["J4"] = (
-                f"最高偏离箱的误差 {high:.3f} 不高于最低箱的 {low:.3f}："
-                "未观察到对 D 的依赖，'按同伴行为是否仍在数据中来决定价值知识是否参与更新'"
-                "这一前提在此任务上不成立，3.2(2) 需要改写。"
+                f"λ 下限区段内，固定效应后高偏离与低偏离箱的误差差为 "
+                f"{value:.3f}（95% CI [{low_ci:.3f}, {high_ci:.3f}]，跨 0）："
+                "同一时刻内未观察到对 D 的依赖，3.2(2) 的前提需要改写。"
             )
     else:
-        out["J4"] = "数据不足，无法判定。"
+        low = bins.get("<=q50", {}).get("mean_abs_err", float("nan"))
+        high = bins.get(">q99", {}).get("mean_abs_err", float("nan"))
+        if low == low and high == high:
+            out["J4"] = (
+                f"最高偏离箱的离线价值误差 {high:.3f}、最低箱 {low:.3f}；"
+                "缺少固定效应结果，只有汇总比较。"
+            )
+        else:
+            out["J4"] = "数据不足，无法判定。"
 
     low_d_checks = [
         (t, entry)
@@ -190,9 +253,17 @@ def decide(exp2a: dict, exp2b: dict, validity: Dict[str, dict]) -> Dict[str, str
     else:
         out["J5"] = "数据不足，无法判定。"
 
-    reg = (exp2b or {}).get("regression", {}).get("terms", {})
-    d_coef = reg.get(">q99", {}).get("coef", float("nan"))
-    t_coef = reg.get("log_t", {}).get("coef", float("nan"))
+    std = (exp2b or {}).get("fixed_effects", {}).get("full_course", {}).get(
+        "standardized_regression", {}
+    )
+    if std:
+        d_coef = std.get("abs_d_max", float("nan"))
+        t_coef = std.get("abs_log_t", float("nan"))
+        reg = {">q99": {"coef": d_coef}}
+    else:
+        reg = (exp2b or {}).get("regression", {}).get("terms", {})
+        d_coef = reg.get(">q99", {}).get("coef", float("nan"))
+        t_coef = reg.get("log_t", {}).get("coef", float("nan"))
     ctrl = (exp2b or {}).get("shuffled_control", {})
     if d_coef == d_coef and t_coef == t_coef:
         if abs(d_coef) > abs(t_coef):

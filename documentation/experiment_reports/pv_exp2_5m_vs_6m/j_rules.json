@@ -1,0 +1,6 @@
+{
+  "J4": "λ 下限区段内，固定效应后高偏离箱的误差反而低 0.189（95% CI [-0.318, -0.059]）：方向与假设相反，不能按同伴偏离度决定价值知识是否参与更新。",
+  "J5": "数据不足，无法判定。",
+  "J6": "t 的系数 0.082 不小于 D 的系数 0.025：按时间衰减已经够用，这是一个重要的反面结果，如实报告。",
+  "shuffle_control": "dependence survives shuffling: it comes from the binning or sampling, not the states"
+}

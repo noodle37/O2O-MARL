@@ -1,0 +1,6 @@
+{
+  "J4": "λ 下限区段内，固定效应后高偏离与低偏离箱的误差差为 0.013（95% CI [-0.108, 0.128]，跨 0）：同一时刻内未观察到对 D 的依赖，3.2(2) 的前提需要改写。",
+  "J5": "数据不足，无法判定。",
+  "J6": "t 的系数 0.124 不小于 D 的系数 0.061：按时间衰减已经够用，这是一个重要的反面结果，如实报告。",
+  "shuffle_control": "dependence survives shuffling: it comes from the binning or sampling, not the states"
+}
