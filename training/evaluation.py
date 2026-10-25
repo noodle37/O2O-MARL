@@ -19,7 +19,8 @@ def evaluate(
     n_episodes: int,
     t_env: int,
     cfg: Dict[str, Any],
-) -> Dict[str, float]:
+    return_episodes: bool = False,
+) -> Dict[str, Any]:
     eps = 0.0
     returns = []
     wins = []
@@ -83,6 +84,8 @@ def evaluate(
     }
     if wins:
         logs["evaluation/win_rate"] = float(np.mean(wins))
+    if return_episodes:
+        logs["evaluation/episode_returns"] = [float(x) for x in returns]
     if traces:
         logs.update(summarize_q_traces(traces, gamma=float(learner.gamma)))
     return logs

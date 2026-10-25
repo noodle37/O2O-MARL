@@ -18,6 +18,10 @@ Usage:
   python scripts/run_pv_exp2a.py --map 5m_vs_6m --seed 1 \
       --t-steps 0 25000 50000 --episodes 100 \
       --out checkpoints/pv_exp2a/5m_vs_6m/seed1.json
+  # cross-arm replication + per-episode dump for paired bootstrap:
+  python scripts/run_pv_exp2a.py --map 5m_vs_6m --seed 1 --arm C \
+      --t-steps 1000000 --episodes 200 --save-episodes \
+      --out checkpoints/pv_exp2a/5m_vs_6m/armC_t1M.json
 """
 
 from __future__ import annotations
@@ -68,12 +72,12 @@ def load_cfg(path: str, overrides: list) -> dict:
     return OmegaConf.to_container(cfg, resolve=True)
 
 
-def checkpoint_at(map_name: str, seed: int, t: int) -> str:
-    """Arm A's checkpoint after t environment steps (t=0 is the offline start)."""
+def checkpoint_at(map_name: str, seed: int, t: int, arm: str = "A") -> str:
+    """Arm X's checkpoint after t environment steps (t=0 is the offline start)."""
     if t <= 0:
         return MAP_OFFLINE[map_name]
     path = os.path.join(
-        "checkpoints", "pv_exp1", map_name, f"A_seed{seed}", "periodic", f"ovm_diag_ckpt_t{t}.pt"
+        "checkpoints", "pv_exp1", map_name, f"{arm}_seed{seed}", "periodic", f"ovm_diag_ckpt_t{t}.pt"
     )
     return path
 
@@ -105,6 +109,7 @@ def evaluate_config(
     n_episodes: int,
     rng: np.random.Generator,
     r_max,
+    save_episodes: bool = False,
 ) -> dict:
     """Run one configuration and return its summary plus per-state arrays.
 
@@ -114,7 +119,7 @@ def evaluate_config(
     replay the same first episode).
     """
     sources = {i: ("offline" if i in offline_agents else "live") for i in range(n_agents)}
-    returns, wins, states = [], [], []
+    returns, wins, lengths, states = [], [], [], []
     for _ in range(n_episodes):
         record = run_episode(
             env,
@@ -129,6 +134,7 @@ def evaluate_config(
             rng=rng,
         )
         returns.append(record.episode_return)
+        lengths.append(int(record.length))
         if record.won is not None:
             wins.append(float(record.won))
         rewards = np.array([s["reward"] for s in record.steps], dtype=np.float64)
@@ -147,6 +153,10 @@ def evaluate_config(
         "n_states": int(finite.sum()),
         "mean_team_deviation": float(np.nanmean(team)) if team.size else float("nan"),
     }
+    if save_episodes:
+        summary["episode_returns"] = [float(x) for x in returns]
+        summary["episode_wins"] = [float(x) for x in wins]
+        summary["episode_lengths"] = [int(x) for x in lengths]
     if finite.sum() >= 8:
         from scipy.stats import spearmanr
 
@@ -163,6 +173,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--map", required=True, choices=sorted(MAP_CONFIG))
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--arm", default="A", help="PV exp1 arm prefix, e.g. A/B/C/D/Z")
     ap.add_argument("--t-steps", nargs="+", type=int, default=list(NATURAL_SHIFT_STEPS))
     ap.add_argument("--eps-values", nargs="+", type=float, default=list(RANDOM_SHIFT_EPS))
     ap.add_argument("--episodes", type=int, default=100)
@@ -170,6 +181,9 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--eval-seed", type=int, default=424242)
     ap.add_argument("--smoke", action="store_true", help="2 episodes per config")
+    ap.add_argument("--skip-random", action="store_true", help="natural-shift family only")
+    ap.add_argument("--skip-natural", action="store_true", help="random-shift family only")
+    ap.add_argument("--save-episodes", action="store_true", help="dump per-episode returns/wins/lengths")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
@@ -212,15 +226,17 @@ def main() -> int:
     results = {
         "map": args.map,
         "seed": args.seed,
+        "arm": args.arm,
         "episodes_per_config": n_episodes,
         "eval_seed": args.eval_seed,
         "n_agents": n_agents,
+        "save_episodes": bool(args.save_episodes),
         "natural": {},
         "random": {},
     }
 
-    for t in args.t_steps:
-        ckpt = checkpoint_at(args.map, args.seed, t)
+    for t in ([] if args.skip_natural else args.t_steps):
+        ckpt = checkpoint_at(args.map, args.seed, t, args.arm)
         if not os.path.isfile(ckpt):
             print(f"[2a] skip t={t}: checkpoint missing {ckpt}", flush=True)
             continue
@@ -254,13 +270,14 @@ def main() -> int:
                 n_episodes=n_episodes,
                 rng=rng,
                 r_max=r_max,
+                save_episodes=args.save_episodes,
             )
             per_config[cfg_spec["name"]] = summary
             print(f"[2a]   t={t} {cfg_spec['name']}: {summary}", flush=True)
         results["natural"][str(t)] = per_config
 
     # Random shift: everyone keeps the offline parameters, partners add eps noise.
-    for eps in args.eps_values:
+    for eps in ([] if args.skip_random else args.eps_values):
         env = make_env(cfg, seed=args.eval_seed)
         summary, _ = evaluate_config(
             env,
@@ -278,6 +295,7 @@ def main() -> int:
             n_episodes=n_episodes,
             rng=rng,
             r_max=r_max,
+            save_episodes=args.save_episodes,
         )
         results["random"][str(eps)] = summary
         print(f"[2a]   eps={eps}: {summary}", flush=True)
