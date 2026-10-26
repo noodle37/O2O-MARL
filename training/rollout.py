@@ -64,6 +64,9 @@ def collect_parallel(envs, learner: QMIXBase, eps: float) -> List[Dict[str, Any]
                     "state": info["state"],
                     "reward": float(np.mean(list(rewards.values()))),
                     "terminated": td_terminated_flag(terminal, next_info),
+                    "explored": np.asarray(
+                        states[i].pop("explored", [False] * len(agents)), dtype=bool
+                    ),
                 }
                 legals = legals_from_info(info, agents)
                 if legals is not None:
@@ -131,6 +134,8 @@ def stack_episodes(episodes, max_seq: int, device: torch.device) -> Dict[str, to
     reward = torch.zeros(n, max_seq, 1, device=device)
     term = torch.zeros(n, max_seq, 1, device=device)
     filled = torch.zeros(n, max_seq, 1, device=device)
+    has_explored = "explored" in episodes[0]["steps"][0]
+    explored = torch.zeros(n, max_seq, 1, device=device) if has_explored else None
     for i, ep in enumerate(episodes):
         length = len(ep["steps"])
         for t, st in enumerate(ep["steps"]):
@@ -145,6 +150,8 @@ def stack_episodes(episodes, max_seq: int, device: torch.device) -> Dict[str, to
             reward[i, t, 0] = st["reward"]
             term[i, t, 0] = st["terminated"]
             filled[i, t, 0] = 1.0
+            if explored is not None and "explored" in st:
+                explored[i, t, 0] = float(np.any(st["explored"]))
         if length < max_seq:
             # Bootstrap slot: copy last obs/state, mark terminated, zero filled on pad step.
             obs[i, length] = obs[i, length - 1]
@@ -167,6 +174,8 @@ def stack_episodes(episodes, max_seq: int, device: torch.device) -> Dict[str, to
         batch["avail_actions"] = torch.ones(
             n, max_seq, n_agents, 1, dtype=torch.bool, device=device
         )
+    if explored is not None:
+        batch["explored"] = explored
     return batch
 
 

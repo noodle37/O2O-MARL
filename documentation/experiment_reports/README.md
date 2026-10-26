@@ -12,6 +12,8 @@
 | 任务四：直接验证 OVM 的价值约束机制 | [task4_ovm_mechanism.md](task4_ovm_mechanism.md) | 三张图同 init 的 on/off 受控对照：OVM 确实在整个训练过程中持续把目标抬高到普通 TD target 之上（直接测量）；"抬高导致性能差异"未建立因果 |
 | 任务五：3s5z_vs_3s6z 上 OVM 与无 OVM 在线训练全程对照 | [task5_ovm_vs_no_ovm_3s5z.md](task5_ovm_vs_no_ovm_3s5z.md) | 同一离线模型出发的两条对照臂约 285 万步：前期（15 万步起）OVM 臂明显更好，无 OVM 臂回报跌至 2.3、排序被打乱；无 OVM 臂逐步恢复并于约 180–210 万步反超；终点无 OVM 臂 15.57 对 OVM 臂 13.93，且 Q 偏差降到接近零而 OVM 臂回升到 11.6 |
 | 匹配协议后的 TDR / PAD+TDR 与 init × schedule 交互 | [task9_tdr_padtdr_matched_init.md](task9_tdr_padtdr_matched_init.md) | 在 matched protocol 的 5.08M-best 离线初始化上补跑 TDR 与 PAD+TDR（各 2 seed，配对 chunk bootstrap）：同一 η 调度在 10M-final 初始化下比固定 η 高 +0.217，在 5.08M-best 初始化下反而低 −0.058；固定调度下仅换初始化即使 TDR 终点变化 +0.166。结论：TDR 的优势来自初始化 × 调度的交互，不是调度的主效应；联合 vs 个体排序在两种子上符号翻转，不能宣称联合排序有稳定额外收益。同时给出 OVM × 混合交互的机制核查（TD target / 激活率 / Q 漂移）与尚缺的梯度贡献分解 |
+| **FHJP 与 OVMSE / UOT 的匹配初始化对比** | [fhjp_vs_ovmse_uot.md](fhjp_vs_ovmse_uot.md) | 同一 5.08M-best 离线初始化、同一终点口径（640 集最终 checkpoint 评估）：5m_vs_6m 上 FHJP 两个完成 seed 的终点胜率 0.689 ± 0.055，与 UOT 臂 A（0.727）、OVMSE 臂 C（0.736）在配对 chunk bootstrap 下不可区分（Δwin +0.002 / −0.008，CI 均跨 0），但显著高于同配方去掉提议器的 vanilla 对照臂 B（+0.180 [0.127, 0.236]）；2s3z 上 FHJP 三个 seed 0.990 ± 0.003，略高于 OVMSE paper 臂（+0.019 [0.005, 0.031]）。提议器在 5m 上于第 2 个版本（约 100 万步）退出，在 2s3z 上于第 1–2 个版本（20–40 万步）退出，退出后训练严格回到普通在线 QMIX TD。 |
+| **FHJP / UOT / OVMSE 算法细节与实验臂设置（详版）** | [fhjp_uot_ovmse_algorithms_and_results.md](fhjp_uot_ovmse_algorithms_and_results.md) | 上表的配套详版：三个算法的公式与代码落点（FHJP 的 0.5/0.5 联合提议与版本末双在轨评估臂、UOT 的冻结 oracle 序数 hinge、OVMSE 的 max(离线 Q, TD target) 混合目标与离线回放混合）、每个臂具体打开的开关（learner_type / transfer.mode / uot_eta / mixing_ratio / use_ovm / λ_mem）、终点与统计对比表、提议器逐版本诊断表、250k 分箱训练曲线 |
 
 ## 复现方式
 
@@ -22,3 +24,5 @@
 - 任务四：`python scripts/analyze_ovm_diag.py --run-root checkpoints/ovm_diag_20261017`（默认输出到本目录，机制图在 `logs/ovm_diag/`）
 
 任务三的实验运行脚本为 `scripts/run_uot_fork_5m_vs_6m.sh`，任务四为 `scripts/run_ovm_diag.sh`；两者的原始日志分别在 `checkpoints/uot_fork_5m_vs_6m_seed1_formal/` 与 `checkpoints/ovm_diag_20261017/`。
+
+FHJP 对比报告的复现：先跑 `bash scripts/eval_fhjp.sh`（为 FHJP 各 seed 与 OVMSE 2s3z 臂补 640 集终点评估，已跑过的会跳过），再跑 `python scripts/analyze_fhjp_vs_arms.py`（默认输出 `logs/fhjp_vs_arms_summary.json` 与本目录下的 `fhjp_vs_ovmse_uot.md`）。

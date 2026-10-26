@@ -70,6 +70,7 @@ class EvalPolicyMixin:
         actions = {}
         chosen_q: List[float] = []
         offline_chosen_q: List[float] = []
+        explored_flags: List[bool] = []
         n_disagree = 0
         score_offline = (
             trace is not None
@@ -102,6 +103,7 @@ class EvalPolicyMixin:
                 a = int(legal_idx[torch.randint(legal_idx.numel(), (1,))].item())
             else:
                 a = int(torch.argmax(q).item())
+            explored_flags.append(bool(explore_here))
             last_actions[agent] = a
             actions[agent] = a
             if trace is not None:
@@ -118,6 +120,10 @@ class EvalPolicyMixin:
             trace["n_agents"] = len(chosen_q)
             if score_offline:
                 trace["offline_chosen_q"] = offline_chosen_q
+        if state is not None:
+            # Consumed by collect_parallel; marks steps whose online action was
+            # exploratory so ROAD can keep them out of Delta_on.
+            state["explored"] = explored_flags
         return actions
 
     def _offline_q_and_greedy(

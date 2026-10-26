@@ -1,0 +1,37 @@
+[start] gpu=1 tag=A_armB_t1M 2026-10-24T01:25:43+08:00
+[start] gpu=3 tag=A_armD_t1M 2026-10-24T01:25:43+08:00
+[start] gpu=2 tag=A_armC_t1M 2026-10-24T01:25:43+08:00
+[start] gpu=cpu tag=C_split2_model2_e12 2026-10-24T01:25:43+08:00
+[done] tag=C_split2_model2_e12 exit=0 2026-10-24T01:26:07+08:00
+[start] gpu=cpu tag=C_split3_model3_e12 2026-10-24T01:26:07+08:00
+[done] tag=C_split3_model3_e12 exit=0 2026-10-24T01:26:31+08:00
+[start] gpu=cpu tag=C_split0_model0_e25 2026-10-24T01:26:31+08:00
+[done] tag=C_split0_model0_e25 exit=0 2026-10-24T01:27:16+08:00
+[start] gpu=cpu tag=D_seed1_H3-5-10_K4-8-16 2026-10-24T01:27:16+08:00
+scripts/launch_extra_runs.sh: line 20: 382019 Aborted                 (core dumped) CUDA_VISIBLE_DEVICES="$gpu" "$@" > "$log" 2>&1
+[done] tag=D_seed1_H3-5-10_K4-8-16 exit=134 2026-10-24T01:27:28+08:00
+[start] gpu=cpu tag=D_seed2_H3-5-10_K4-8-16 2026-10-24T01:27:28+08:00
+scripts/launch_extra_runs.sh: line 20: 382851 Aborted                 (core dumped) CUDA_VISIBLE_DEVICES="$gpu" "$@" > "$log" 2>&1
+[done] tag=D_seed2_H3-5-10_K4-8-16 exit=134 2026-10-24T01:27:39+08:00
+[done] tag=A_armD_t1M exit=0 2026-10-24T01:39:56+08:00
+[start] gpu=3 tag=B_armD_t1M 2026-10-24T01:39:56+08:00
+[done] tag=B_armD_t1M exit=0 2026-10-24T01:43:10+08:00
+[start] gpu=3 tag=E_C_t1M_lr1e4_u200_e128 2026-10-24T01:43:10+08:00
+[done] tag=A_armC_t1M exit=0 2026-10-24T01:45:50+08:00
+[start] gpu=2 tag=B_armC_t1M 2026-10-24T01:45:50+08:00
+[done] tag=A_armB_t1M exit=0 2026-10-24T01:46:19+08:00
+[start] gpu=1 tag=B_armB_t1M 2026-10-24T01:46:19+08:00
+[done] tag=E_C_t1M_lr1e4_u200_e128 exit=0 2026-10-24T01:46:29+08:00
+[start] gpu=3 tag=B_armD_t250k 2026-10-24T01:46:29+08:00
+[done] tag=B_armD_t250k exit=0 2026-10-24T01:49:28+08:00
+[done] tag=B_armB_t1M exit=0 2026-10-24T01:50:06+08:00
+[start] gpu=1 tag=E_A_t1M_lr1e4_u500_e200 2026-10-24T01:50:06+08:00
+[done] tag=B_armC_t1M exit=0 2026-10-24T01:51:08+08:00
+[start] gpu=2 tag=F_A_c96_students3_lr1e4 2026-10-24T01:51:08+08:00
+[done] tag=E_A_t1M_lr1e4_u500_e200 exit=0 2026-10-24T01:56:49+08:00
+[start] gpu=1 tag=E_A_t250k_lr1e4_u500_e200 2026-10-24T01:56:49+08:00
+[done] tag=F_A_c96_students3_lr1e4 exit=0 2026-10-24T02:02:11+08:00
+[start] gpu=2 tag=E_B_t1M_lr1e4_u200_e128 2026-10-24T02:02:11+08:00
+[done] tag=E_A_t250k_lr1e4_u500_e200 exit=0 2026-10-24T02:02:32+08:00
+[done] tag=E_B_t1M_lr1e4_u200_e128 exit=0 2026-10-24T02:06:00+08:00
+[all done] 2026-10-24T02:06:00+08:00

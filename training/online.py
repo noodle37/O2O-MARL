@@ -14,11 +14,13 @@ import numpy as np
 import torch
 
 from data.vault_dataset import print_dataset_stats
+from fhjp.controller import build_controller
 from fsr.learner import FSRLearner
 from macal.learner import MaCalQLLearner
 from macflow.learner import MACFlowLearner
 from ovmse.diagnostics import ovm_fixed_sample_diag
 from ovmse.transfer import apply_transfer
+from road.controller import build_road_controller
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
 from training.rollout import collect_parallel, merge_offline_online, stack_episodes
@@ -383,13 +385,49 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 perm_seed=perm_seed,
                 mixer_reinit_seed=mixer_seed,
             )
+    # Joint behaviour proposer (FHJP). Built here so the summary line below is
+    # accurate; MACFlow has no frozen offline Q network to propose from and
+    # returns through its own runner before the rollout loop. When enabled, the
+    # rollout policy proposes the offline and online joint greedy actions and
+    # executes one at p = 0.5; every version boundary then judges the offline
+    # joint behaviour with two paired on-policy rollouts and can retire the
+    # proposer for good.
+    proposer = (
+        build_controller(cfg, learner, lambda seed: make_env(cfg, seed=seed))
+        if not isinstance(learner, MACFlowLearner)
+        else None
+    )
+    rollout_policy = proposer.policy if proposer is not None else learner
+    # ROAD outer controller: picks the offline episode fraction for each period.
+    # The inner learner, batch construction and mixer are unchanged.
+    road = build_road_controller(cfg, learner)
     print(
         f"online learner={type(learner).__name__} transfer_mode={mode} "
         f"use_ovm={use_ovm} mixing_ratio={float(cfg['system'].get('mixing_ratio', 0.0))} "
         f"seq_explore={bool(getattr(learner, 'sequential_explore', False))} "
         f"shift={shift} offline_ckpt={ckpt} fork_at={fork_at} branch={branch} "
-        f"resume_fork={resume_fork}"
+        f"resume_fork={resume_fork} "
+        f"fhjp={'on' if proposer is not None else 'off'} "
+        f"road={'on' if road is not None else 'off'}"
     )
+    if proposer is not None:
+        print(
+            f"[fhjp] proposer on: p={proposer.policy.p} version_len={proposer.version_len} "
+            f"eval_episodes_per_arm={proposer.eval_episodes_per_arm} "
+            f"min_eval_episodes={proposer.min_eval_episodes} alpha={proposer.alpha} "
+            f"eval_seed_base={proposer.eval_seed_base} "
+            f"count_eval_in_budget={proposer.count_eval_in_budget}",
+            flush=True,
+        )
+    if road is not None:
+        print(
+            f"[road] arms={road.arms} kappa={road.kappa} c={road.c} "
+            f"window={road.window} period_steps={road.period_steps} "
+            f"delta_batch={road.delta_batch} normalize={road.normalize_reward} "
+            f"mask_explored={road.mask_explored} seed_offset={road.seed_offset} "
+            f"initial_ratio={road.ratio}",
+            flush=True,
+        )
 
     if isinstance(learner, MACFlowLearner):
         from macflow.online_runner import run_macflow_online
@@ -475,7 +513,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 _write_fork_snapshot(cfg, learner, t_env, online_buffer, rng)
                 return
 
-        for ep in collect_parallel(envs, learner, eps_at(t_env)):
+        for ep in collect_parallel(envs, rollout_policy, eps_at(t_env)):
             online_buffer.append(ep)
             if not count_updates:
                 t_env += int(ep["length"])
@@ -498,6 +536,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         episode_delta = batch_size_run
         step_mix = mixing_ratio
         support_info: Dict[str, float] = {}
+        if road is not None:
+            step_mix = road.ratio
         if isinstance(learner, FSRLearner):
             probe_idx = rng.choice(len(online_buffer), size=min(total_batch, len(online_buffer)), replace=False)
             probe = stack_episodes(
@@ -530,6 +570,11 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             )
         else:
             train_batch = online_batch
+        eff_offline_frac = 0.0
+        if offline_bs > 0:
+            all_filled = train_batch["filled"][..., 0].sum()
+            off_filled = train_batch["filled"][:offline_bs, :, 0].sum()
+            eff_offline_frac = float(off_filled / all_filled.clamp(min=1.0))
         if isinstance(learner, MaCalQLLearner):
             logs = learner.train_on_batch(
                 train_batch,
@@ -567,7 +612,14 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             "online_buffer": len(online_buffer),
             "transfer/mode": mode,
         }
+        if road is not None:
+            train_logs["road/ratio"] = float(step_mix)
+            train_logs["road/eff_offline_frac"] = eff_offline_frac
         logger.write(train_logs)
+        if road is not None:
+            road_row = road.after_train_step(offline_data, online_buffer, t_env)
+            if road_row is not None:
+                logger.write(road_row, force=True)
         if any(k.startswith("train_ovm/") for k in logs):
             train_stats.append(
                 {k: v for k, v in logs.items() if k.startswith("train_ovm/")}
@@ -590,6 +642,25 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                     },
                     default_name=f"ovm_diag_ckpt_t{boundary * ckpt_every}.pt",
                 )
+
+        # FHJP version boundary: freeze the online parameters, run the two paired
+        # on-policy arms, and retire the proposer if the offline joint behaviour
+        # has no measurable positive value. The 2M evaluation trajectories count
+        # towards the environment-interaction budget.
+        if proposer is not None:
+            boundary_logs, eval_steps = proposer.boundary_logs(t_env)
+            if boundary_logs is not None:
+                proposer.last_version_t = t_env
+                if eval_steps:
+                    t_env += eval_steps
+                    learner.t_env = t_env
+                logger.write(boundary_logs, force=True)
+                if proposer.exited:
+                    print(
+                        f"[fhjp] proposer retired at t_env={t_env} after version "
+                        f"{proposer.version}; continuing with plain online MARL",
+                        flush=True,
+                    )
 
     ckpt_dir = resolve_path(cfg.get("checkpoint_dir"))
     if ckpt_dir:
@@ -614,6 +685,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 "phase": "online",
                 "transfer_mode": mode,
                 "fork_branch": branch,
+                **({"road": road.state_dict()} if road is not None else {}),
             },
             default_name=f"{stem}_online_{mode}{suffix}_seed{cfg['seed']}.pt",
         )
