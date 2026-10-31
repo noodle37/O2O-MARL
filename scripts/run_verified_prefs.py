@@ -125,6 +125,7 @@ def run_trial(
     add_agent_id: bool,
     device,
     skip_conflicts: int = 0,
+    treatment_agents: Optional[Tuple[int, ...]] = None,
 ) -> Optional[Dict[str, Any]]:
     """One episode; returns the selected-conflict trial record or None.
 
@@ -180,7 +181,8 @@ def run_trial(
                     a_off.append(_greedy(q_off, legal))
 
         executed = a_live
-        if not forced and any(a_live[i] != a_off[i] for i in range(n_agents)):
+        treated = list(range(n_agents)) if treatment_agents is None else list(treatment_agents)
+        if not forced and any(a_live[i] != a_off[i] for i in treated):
             conflict_rank += 1
             if conflict_rank > skip_conflicts:
                 forced = True
@@ -198,7 +200,10 @@ def run_trial(
                 q_on_margin = on_live - on_off
 
                 D = int(rng.random() < p)
-                executed = a_off if D == 1 else a_live
+                a_treated = list(a_live)
+                for i in treated:
+                    a_treated[i] = a_off[i]
+                executed = a_treated if D == 1 else a_live
                 phase = float(t) / float(max(1, episode_limit))
                 record = {
                     "trial_t": int(t),
@@ -206,9 +211,12 @@ def run_trial(
                     "skip_conflicts": int(skip_conflicts),
                     "D": D,
                     "p": float(p),
+                    "treatment_agents": treated,
                     "a_off": [int(x) for x in a_off],
                     "a_live": [int(x) for x in a_live],
+                    "a_treated": [int(x) for x in a_treated],
                     "n_disagree": int(sum(a_live[i] != a_off[i] for i in range(n_agents))),
+                    "n_treatment_disagree": int(sum(a_live[i] != a_off[i] for i in treated)),
                     "allies": int(allies),
                     "enemies": int(enemies),
                     "phase": phase,

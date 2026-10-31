@@ -12,10 +12,11 @@ import torch
 from ovmse.behaviour import BehaviourCloningMixin
 from ovmse.cql import CQLLossMixin
 from ovmse.diagnostics import ovm_target_stats
-from ovmse.ovm import OVMMixin
+from ovmse.ovm import OVMMixin, normalize_gate_mode
 from ovmse.targets import build_td_lambda_targets
 from qmix.core import QMIXBase
 from qmix.networks import MarlcRNN, QMixer
+from sapr.regularizer import SAPRPriorMixin
 
 
 class PaperQMIXLearner(
@@ -23,6 +24,7 @@ class PaperQMIXLearner(
     CQLLossMixin,
     BehaviourCloningMixin,
     OVMMixin,
+    SAPRPriorMixin,
 ):
     def __init__(
         self,
@@ -53,6 +55,12 @@ class PaperQMIXLearner(
         mixing_ratio: float = 0.0,
         lambda_memory_end: float = 1.0,
         lambda_anneal_steps: int = 0,
+        support_gate_mode: str = "off",
+        support_cql_mode: str = "off",
+        support_cql_normalize_mass: bool = False,
+        support_gate_theta: float = 1.0,
+        support_gate_temp: float = 0.25,
+        support_softmax_temp: float = 1.0,
         ovm_diag_train_stats: bool = True,
         ovm_diag_stride: int = 4,
         device: str = "cuda",
@@ -77,6 +85,12 @@ class PaperQMIXLearner(
         self.mixing_ratio = mixing_ratio
         self.lambda_memory_end = lambda_memory_end
         self.lambda_anneal_steps = lambda_anneal_steps
+        self.support_gate_mode = normalize_gate_mode(support_gate_mode)
+        self.support_cql_mode = normalize_gate_mode(support_cql_mode)
+        self.support_cql_normalize_mass = bool(support_cql_normalize_mass)
+        self.support_gate_theta = float(support_gate_theta)
+        self.support_gate_temp = float(support_gate_temp)
+        self.support_softmax_temp = float(support_softmax_temp)
         self.ovm_diag_train_stats = bool(ovm_diag_train_stats)
         self.ovm_diag_stride = max(1, int(ovm_diag_stride))
 
@@ -120,6 +134,7 @@ class PaperQMIXLearner(
         self.eval_offline_rnn = None
         self.eval_offline_last_actions = None
         self.training_step_ctr = 0
+        self.init_sapr_prior()
 
     def train_on_batch(
         self,
@@ -129,6 +144,7 @@ class PaperQMIXLearner(
         use_ovm: Optional[bool] = None,
         t_env: Optional[int] = None,
         episode_delta: int = 1,
+        td_row_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, float]:
         cql_w = self.cql_weight if cql_weight is None else cql_weight
         ovm_on = self.use_ovm if use_ovm is None else use_ovm
@@ -147,6 +163,14 @@ class PaperQMIXLearner(
         mask = filled[:, :-1].float()
         mask[:, 1:] = mask[:, 1:] * (1.0 - term[:, :-1])
         mask_exp = mask
+        # MU-APR composes each batch from offline reference rows and online rows;
+        # only the online tail may contribute to the TD objective, while the KL
+        # term still sees the full mixed history.
+        if td_row_mask is not None:
+            td_rows = td_row_mask.to(mask.device, mask.dtype).view(-1, 1, 1)
+            td_mask = mask_exp * td_rows
+        else:
+            td_mask = mask_exp
 
         with torch.no_grad():
             target_mac_out = self._forward_qs(batch, target=True)
@@ -172,27 +196,39 @@ class PaperQMIXLearner(
 
         lam = self.get_lambda_memory(t_env)
         ovm_stats: Dict[str, float] = {}
+        gate_stats: Dict[str, float] = {}
         offline_ready = self.offline_q_network is not None and self.offline_mixer is not None
         # OVM-on: off_tot is already computed for the loss, so the stats are free.
         # OVM-off: recompute on a stride so the extra frozen unroll stays cheap.
         stride_hit = (self.training_step_ctr % self.ovm_diag_stride) == 0
+        off_out = None
         if ovm_on and offline_ready:
-            off_tot = self._offline_chosen_tot(batch, actions, states)
+            off_out = self._offline_unroll(batch)
+            off_tot = self._offline_chosen_tot(batch, actions, states, off_out=off_out)
+            lam_eff = lam
+            if self.support_gate_mode != "off":
+                gate = self.support_gate(batch, off_out=off_out)
+                lam_eff = lam * gate
+                gate_mask = mask_exp > 0.5
+                gate_stats["support/gate_mean"] = float(gate[gate_mask].mean().item())
+                gate_stats["support/gate_frac_above_half"] = float(
+                    (gate[gate_mask] > 0.5).float().mean().item()
+                )
             loss = self._ovm_td_loss(
-                batch, actions, states, chosen_tot, td_targets, mask_exp, lam, off_tot=off_tot
+                batch, actions, states, chosen_tot, td_targets, td_mask, lam_eff, off_tot=off_tot
             )
             if self.ovm_diag_train_stats:
                 ovm_stats = ovm_target_stats(
                     off_tot,
                     td_targets,
                     mask_exp,
-                    lam,
+                    lam_eff,
                     chosen_tot=chosen_tot,
                     prefix="train_ovm/",
                 )
         else:
             td_err = 0.5 * (chosen_tot[:, :-1] - td_targets) ** 2
-            loss = (td_err * mask_exp).sum() / mask_exp.sum().clamp(min=1.0)
+            loss = (td_err * td_mask).sum() / td_mask.sum().clamp(min=1.0)
             if self.ovm_diag_train_stats and offline_ready and stride_hit:
                 off_tot = self._offline_chosen_tot(batch, actions, states)
                 ovm_stats = ovm_target_stats(
@@ -206,12 +242,53 @@ class PaperQMIXLearner(
 
         cql_loss_val = 0.0
         if cql_w > 0:
+            # Second reuse channel: keep the conservatism where the old team's
+            # support still covers the executed joint action and release it
+            # where it does not. The weighted loss is renormalised, so this arm
+            # differs from a tuned global cql_weight only in WHERE it applies.
+            cql_weight_map = None
+            if self.support_cql_mode != "off" and offline_ready:
+                cql_weight_map = self.support_gate(
+                    batch, off_out=off_out, mode=self.support_cql_mode
+                )
+                if self.support_cql_normalize_mass:
+                    # Per-batch normalization: keep the same total CQL mass as
+                    # uniform (mean weight == 1), so any benefit can only come
+                    # from WHERE the penalty is placed.
+                    masked = cql_weight_map[mask_exp > 0.5]
+                    mean_w = masked.mean().clamp(min=1e-6)
+                    cql_weight_map = cql_weight_map / mean_w
+                gate_stats["support/cql_weight_mean"] = float(
+                    cql_weight_map[mask_exp > 0.5].mean().item()
+                )
             if self.raw_cql:
-                cql_loss = self._compute_macql_loss(mac_out, batch, chosen_tot, mask_exp)
+                cql_loss = self._compute_macql_loss(
+                    mac_out, batch, chosen_tot, mask_exp, weight=cql_weight_map
+                )
             else:
-                cql_loss = self._compute_cfcql_loss(mac_out, batch, chosen_tot, mask_exp)
+                cql_loss = self._compute_cfcql_loss(
+                    mac_out, batch, chosen_tot, mask_exp, weight=cql_weight_map
+                )
             loss = loss + cql_w * cql_loss
             cql_loss_val = float(cql_loss.detach().item())
+
+        prior_stats: Dict[str, float] = {}
+        prior_w = float(getattr(self, "prior_kl_weight", 0.0))
+        if prior_w > 0.0:
+            if not offline_ready:
+                raise RuntimeError(
+                    "prior KL weight is positive but no frozen offline network is loaded"
+                )
+            if off_out is None:
+                off_out = self._offline_unroll(batch)
+            prior_kl_value = self.prior_kl_loss(batch, mac_out, offline_out=off_out)
+            loss = loss + prior_w * prior_kl_value
+            prior_stats = {
+                "sapr/prior_kl": float(prior_kl_value.detach().item()),
+                "sapr/prior_weight": prior_w,
+                "muapr/kl_train": float(prior_kl_value.detach().item()),
+                "muapr/lambda": prior_w,
+            }
 
         self.training_step_ctr += 1
         self.optimizer.zero_grad()
@@ -240,6 +317,8 @@ class PaperQMIXLearner(
             "mean_chosen_q_values": mean_q,
             "lambda_memory": lam,
             **ovm_stats,
+            **gate_stats,
+            **prior_stats,
         }
 
     def state_dicts(self) -> Dict[str, Any]:

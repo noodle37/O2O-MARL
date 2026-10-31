@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from collections import deque
 from typing import Any, Dict, List, Optional
 
@@ -14,13 +15,17 @@ import numpy as np
 import torch
 
 from data.vault_dataset import print_dataset_stats
-from fhjp.controller import build_controller
 from fsr.learner import FSRLearner
 from macal.learner import MaCalQLLearner
 from macflow.learner import MACFlowLearner
+from muapr.controller import build_muapr_controller
+from muapr.meta import MetaGradientEngine
 from ovmse.diagnostics import ovm_fixed_sample_diag
+from ovmse.learner import PaperQMIXLearner
 from ovmse.transfer import apply_transfer
 from road.controller import build_road_controller
+from sapr.controller import build_sapr_controller
+from sapr.probe import probe_prior_utility
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
 from training.rollout import collect_parallel, merge_offline_online, stack_episodes
@@ -162,9 +167,21 @@ def _write_fork_snapshot(
     t_env: int,
     online_buffer: deque,
     batch_rng,
+    sapr=None,
+    muapr=None,
 ) -> None:
     """Freeze the shared state every branch resumes from, plus a manifest."""
     path = _fork_snapshot_path(cfg, t_env)
+    extra = {
+        "seed": int(cfg["seed"]),
+        "branch": _fork_branch(cfg),
+        "fork_at": int(cfg.get("fork_at", -1)),
+        "phase": "fork",
+    }
+    if sapr is not None:
+        extra["sapr"] = sapr.state_dict()
+    if muapr is not None:
+        extra["muapr"] = muapr.state_dict()
     save_trainer_snapshot(
         path,
         learner,
@@ -172,12 +189,7 @@ def _write_fork_snapshot(
         buffer_maxlen=int(cfg.get("buffer_size", 5000)),
         t_env=t_env,
         batch_rng=batch_rng,
-        extra={
-            "seed": int(cfg["seed"]),
-            "branch": _fork_branch(cfg),
-            "fork_at": int(cfg.get("fork_at", -1)),
-            "phase": "fork",
-        },
+        extra=extra,
     )
     meta = {
         "seed": int(cfg["seed"]),
@@ -194,8 +206,8 @@ def _write_fork_snapshot(
     print(f"[fork] snapshot t_env={t_env} -> {path}")
 
 
-def _load_fork_snapshot(cfg: Dict[str, Any], learner) -> tuple[int, deque, Any]:
-    """Restore the shared trainer state and return (t_env, online_buffer, batch_rng)."""
+def _load_fork_snapshot(cfg: Dict[str, Any], learner) -> tuple[int, deque, Any, Dict[str, Any]]:
+    """Restore the shared trainer state and return (t_env, online_buffer, batch_rng, extra)."""
     path = str(resolve_path(cfg["resume_fork"]))
     state = load_trainer_snapshot(path, learner, map_location=learner.device)
     t_env = int(state["t_env"])
@@ -209,7 +221,7 @@ def _load_fork_snapshot(cfg: Dict[str, Any], learner) -> tuple[int, deque, Any]:
         f"[fork] resumed branch={_fork_branch(cfg)} t_env={t_env} "
         f"buffer={len(online_buffer)} snapshot={path}"
     )
-    return t_env, online_buffer, batch_rng
+    return t_env, online_buffer, batch_rng, dict(state.get("extra") or {})
 
 
 def _load_ovm_diag_sample(cfg: Dict[str, Any], device) -> Optional[Dict[str, Any]]:
@@ -236,7 +248,7 @@ def _mean_stats(rows: List[Dict[str, float]]) -> Dict[str, float]:
     """Running mean of per-step training diagnostics over one eval interval."""
     if not rows:
         return {}
-    keys = rows[0].keys()
+    keys = {k for r in rows for k in r}
     out: Dict[str, float] = {}
     for key in keys:
         vals = [float(r[key]) for r in rows if key in r and r[key] == r[key]]
@@ -280,6 +292,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
     fork_at = int(cfg.get("fork_at", -1))
     resume_fork = cfg.get("resume_fork")
     branch = _fork_branch(cfg)
+    fork_extra: Dict[str, Any] = {}
 
     batch_size_run = int(cfg.get("batch_size_run", 1))
     envs = [make_env(cfg, seed=int(cfg["seed"]) + i) for i in range(batch_size_run)]
@@ -299,7 +312,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         # Q-bar in particular has to be the snapshot's frozen oracle, not a re-freeze
         # of the fork-time live net.
         _seed_branch_log(cfg)
-        t_env, online_buffer, rng = _load_fork_snapshot(cfg, learner)
+        t_env, online_buffer, rng, fork_extra = _load_fork_snapshot(cfg, learner)
         learner.t_env = t_env
         learner.batch_size_run = batch_size_run
         last_test_t = t_env
@@ -385,40 +398,111 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 perm_seed=perm_seed,
                 mixer_reinit_seed=mixer_seed,
             )
-    # Joint behaviour proposer (FHJP). Built here so the summary line below is
-    # accurate; MACFlow has no frozen offline Q network to propose from and
-    # returns through its own runner before the rollout loop. When enabled, the
-    # rollout policy proposes the offline and online joint greedy actions and
-    # executes one at p = 0.5; every version boundary then judges the offline
-    # joint behaviour with two paired on-policy rollouts and can retire the
-    # proposer for good.
-    proposer = (
-        build_controller(cfg, learner, lambda seed: make_env(cfg, seed=seed))
-        if not isinstance(learner, MACFlowLearner)
-        else None
-    )
-    rollout_policy = proposer.policy if proposer is not None else learner
+
+    # VCKR extracts its offline sub-team dictionary once, after the frozen
+    # offline critic is in place and before any interaction starts.
+    if hasattr(learner, "setup_vckr"):
+        vckr_info = learner.setup_vckr(offline_data, cfg)
+        logger.write(
+            vckr_info
+            | {"t_env": 0, "evaluation/training_steps": 0, "transfer/mode": mode},
+            force=True,
+        )
+    rollout_policy = learner
     # ROAD outer controller: picks the offline episode fraction for each period.
     # The inner learner, batch construction and mixer are unchanged.
     road = build_road_controller(cfg, learner)
+    # SAPR outer loop: a frozen-prior KL weight adapted from random
+    # local-intervention probes. Only the plain QMIX training step computes the
+    # KL term, so other learners reject the config instead of silently ignoring
+    # it.
+    sapr = build_sapr_controller(cfg)
+    if sapr is not None:
+        if type(learner).train_on_batch is not PaperQMIXLearner.train_on_batch:
+            raise RuntimeError(
+                "sapr requires the PaperQMIXLearner train_on_batch implementation"
+            )
+        if getattr(learner, "offline_q_network", None) is None:
+            raise RuntimeError(
+                "sapr requires a frozen offline policy; enable transfer.load_offline_nets"
+            )
+        if int(learner.n_actions) <= 1:
+            raise RuntimeError("sapr random-intervention probes require discrete actions")
+        if fork_extra.get("sapr"):
+            sapr.load_state_dict(fork_extra["sapr"])
+        learner.set_prior(
+            weight=sapr.lambda_value,
+            temperature=sapr.settings.temperature,
+            support_floor=sapr.settings.support_floor,
+        )
+    # MU-APR: same frozen prior, but the weight is driven by a meta-gradient on
+    # a validation split of recent episodes instead of random-intervention probes.
+    muapr = build_muapr_controller(cfg)
+    muapr_engine = None
+    if muapr is not None:
+        if sapr is not None:
+            raise RuntimeError("muapr and sapr cannot both be enabled")
+        if road is not None:
+            raise RuntimeError("muapr cannot be combined with the road controller")
+        if type(learner).train_on_batch is not PaperQMIXLearner.train_on_batch:
+            raise RuntimeError(
+                "muapr requires the PaperQMIXLearner train_on_batch implementation"
+            )
+        if getattr(learner, "offline_q_network", None) is None:
+            raise RuntimeError(
+                "muapr requires a frozen offline policy; enable transfer.load_offline_nets"
+            )
+        if int(learner.n_actions) <= 1:
+            raise RuntimeError("muapr requires discrete actions")
+        if fork_extra.get("muapr"):
+            muapr.load_state_dict(fork_extra["muapr"])
+        learner.set_prior(
+            weight=muapr.lambda_value,
+            temperature=muapr.settings.temperature,
+            support_floor=muapr.settings.support_floor,
+        )
+        muapr_engine = MetaGradientEngine(learner, muapr.settings, offline_data)
+    # Teammate-support gate: theta comes from the quantile of the old team's own
+    # deviation distribution on the offline dataset, so "supported" is defined by
+    # the offline data rather than by a tuned constant.
+    gate_info: Dict[str, float] = {}
+    # Read the normalised modes off the learner, never the raw config: OmegaConf
+    # turns the YAML tokens on/off into booleans, so str(cfg[...]) == "False"
+    # here and a raw comparison against "off" is always true.
+    _gate_needed = (use_ovm and getattr(learner, "support_gate_mode", "off") != "off") or (
+        getattr(learner, "support_cql_mode", "off") != "off"
+    )
+    if (
+        _gate_needed
+        and hasattr(learner, "calibrate_support_gate")
+        and getattr(learner, "offline_q_network", None) is not None
+    ):
+        gate_cfg = cfg["system"]
+        cal_rng = np.random.default_rng(int(cfg["seed"]) + 7)
+        n_batches = int(gate_cfg.get("support_calib_batches", 8))
+        cal_bs = int(gate_cfg.get("support_calib_batch_size", 64))
+        gate_info = learner.calibrate_support_gate(
+            [offline_data.sample(cal_bs, cal_rng, device=learner.device) for _ in range(n_batches)],
+            quantile=float(gate_cfg.get("support_quantile", 0.5)),
+            temp_frac=float(gate_cfg.get("support_temp_frac", 0.25)),
+        )
+        print(
+            f"support_gate mode={learner.support_gate_mode} "
+            f"cql_mode={learner.support_cql_mode} "
+            f"theta={gate_info['support/theta']:.4f} temp={gate_info['support/temp']:.4f} "
+            f"offline_dev_mean={gate_info['support/offline_dev_mean']:.4f} "
+            f"n={gate_info['support/n']}",
+            flush=True,
+        )
     print(
         f"online learner={type(learner).__name__} transfer_mode={mode} "
         f"use_ovm={use_ovm} mixing_ratio={float(cfg['system'].get('mixing_ratio', 0.0))} "
         f"seq_explore={bool(getattr(learner, 'sequential_explore', False))} "
         f"shift={shift} offline_ckpt={ckpt} fork_at={fork_at} branch={branch} "
         f"resume_fork={resume_fork} "
-        f"fhjp={'on' if proposer is not None else 'off'} "
-        f"road={'on' if road is not None else 'off'}"
+        f"road={'on' if road is not None else 'off'} "
+        f"sapr={'on' if sapr is not None else 'off'}"
     )
-    if proposer is not None:
-        print(
-            f"[fhjp] proposer on: p={proposer.policy.p} version_len={proposer.version_len} "
-            f"eval_episodes_per_arm={proposer.eval_episodes_per_arm} "
-            f"min_eval_episodes={proposer.min_eval_episodes} alpha={proposer.alpha} "
-            f"eval_seed_base={proposer.eval_seed_base} "
-            f"count_eval_in_budget={proposer.count_eval_in_budget}",
-            flush=True,
-        )
     if road is not None:
         print(
             f"[road] arms={road.arms} kappa={road.kappa} c={road.c} "
@@ -426,6 +510,28 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             f"delta_batch={road.delta_batch} normalize={road.normalize_reward} "
             f"mask_explored={road.mask_explored} seed_offset={road.seed_offset} "
             f"initial_ratio={road.ratio}",
+            flush=True,
+        )
+    if sapr is not None:
+        s = sapr.settings
+        print(
+            f"[sapr] lambda={sapr.lambda_value:.6f} bounds=[{s.lambda_min}, {s.lambda_max}] "
+            f"base={s.lambda_base} delta={s.delta_lambda} alpha={s.alpha} "
+            f"beta={s.beta} rho={s.rho} temperature={s.temperature} "
+            f"interval_steps={s.interval_steps} probes={s.probe_episodes} "
+            f"behaviour={s.probe_behaviour} se_mode={s.se_mode} "
+            f"count_in_budget={s.count_probe_in_budget}",
+            flush=True,
+        )
+    if muapr is not None:
+        s = muapr.settings
+        print(
+            f"[muapr] lambda_ref={s.lambda_ref:.6f} lambda0={muapr.lambda_value:.6f} "
+            f"z={muapr.z:.6f} interval={s.interval_steps} start_after={s.start_after_steps} "
+            f"K={s.inner_steps} inner_bs={s.inner_batch_size} "
+            f"offline_frac={s.kl_offline_frac} val_recent={s.val_recent_episodes} "
+            f"val_eps={s.val_episodes} ratio_clip={s.ratio_clip} kappa={s.kappa} "
+            f"meta_lr={s.meta_lr} z_clip={s.z_clip}",
             flush=True,
         )
 
@@ -485,6 +591,9 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         if interval > 0 and t_env - last_test_t >= interval:
             last_test_t = t_env
             eval_logs = evaluate(eval_target, learner, num_eval, t_env, cfg)
+            dual_logs: Dict[str, Any] = {}
+            if hasattr(learner, "after_evaluation"):
+                dual_logs = learner.after_evaluation(eval_logs)
             diag_logs: Dict[str, Any] = {}
             if diag_sample is not None:
                 try:
@@ -497,6 +606,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 | dict(getattr(learner, "last_diag", {}) or {})
                 | diag_logs
                 | _mean_stats(train_stats)
+                | dual_logs
                 | {
                     "evaluation/training_steps": t_env,
                     "t_env": t_env,
@@ -504,13 +614,35 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                     "fork/branch": branch,
                     "ovm_diag/use_ovm": float(use_ovm),
                 }
+                | gate_info
+                | (
+                    {
+                        "sapr/lambda": float(sapr.lambda_value),
+                        "sapr/version": float(sapr.version),
+                        "sapr/m": float(sapr.m),
+                        "sapr/v": float(sapr.v),
+                    }
+                    if sapr is not None
+                    else {}
+                )
+                | (
+                    {
+                        "muapr/lambda": float(muapr.lambda_value),
+                        "muapr/z": float(muapr.z),
+                        "muapr/version": float(muapr.version),
+                    }
+                    if muapr is not None
+                    else {}
+                )
             )
             logger.write(eval_row, force=True)
             train_stats = []
             if fork_at > 0 and t_env >= fork_at:
                 # Fork point reached: freeze the shared state and stop. The branches
                 # resume from this snapshot and only differ in the ranking weight.
-                _write_fork_snapshot(cfg, learner, t_env, online_buffer, rng)
+                _write_fork_snapshot(
+                    cfg, learner, t_env, online_buffer, rng, sapr=sapr, muapr=muapr
+                )
                 return
 
         for ep in collect_parallel(envs, rollout_policy, eps_at(t_env)):
@@ -547,6 +679,10 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             )
             support_info = learner.support_mix_ratio(probe)
             step_mix = float(support_info.get("fsr/offline_frac", 0.0))
+        if muapr is not None:
+            # Mixed history nu_k = 1/2 d_off_ref + 1/2 d_on,k_recent. TD is
+            # restricted to the online tail below; KL sees both halves.
+            step_mix = float(muapr.settings.kl_offline_frac)
         if step_mix > 0:
             offline_bs = int(round(total_batch * step_mix))
             online_bs = total_batch - offline_bs
@@ -562,14 +698,24 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             offline_data.stats.max_seq_length,
             learner.device,
         )
+        offline_batch = None
         if offline_bs > 0:
-            train_batch = merge_offline_online(
-                offline_data.sample(offline_bs, rng, device=learner.device),
-                online_batch,
-                step_mix,
-            )
+            offline_batch = offline_data.sample(offline_bs, rng, device=learner.device)
+            train_batch = merge_offline_online(offline_batch, online_batch, step_mix)
         else:
             train_batch = online_batch
+        td_row_mask = None
+        kl_offline_frac = 0.0
+        if muapr is not None:
+            n_off = int(offline_batch["obs"].shape[0]) if offline_batch is not None else 0
+            n_on = int(online_batch["obs"].shape[0])
+            td_row_mask = torch.cat(
+                [
+                    torch.zeros(n_off, device=learner.device),
+                    torch.ones(n_on, device=learner.device),
+                ]
+            )
+            kl_offline_frac = float(n_off / max(n_off + n_on, 1))
         eff_offline_frac = 0.0
         if offline_bs > 0:
             all_filled = train_batch["filled"][..., 0].sum()
@@ -605,6 +751,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 use_ovm=use_ovm,
                 t_env=t_env,
                 episode_delta=episode_delta,
+                td_row_mask=td_row_mask,
             )
         train_logs = {
             **logs,
@@ -612,6 +759,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             "online_buffer": len(online_buffer),
             "transfer/mode": mode,
         }
+        if muapr is not None:
+            train_logs["muapr/kl_offline_frac"] = kl_offline_frac
         if road is not None:
             train_logs["road/ratio"] = float(step_mix)
             train_logs["road/eff_offline_frac"] = eff_offline_frac
@@ -620,10 +769,100 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             road_row = road.after_train_step(offline_data, online_buffer, t_env)
             if road_row is not None:
                 logger.write(road_row, force=True)
-        if any(k.startswith("train_ovm/") for k in logs):
+        tracked_prefixes = ("train_ovm/", "support/", "sapr/", "muapr/")
+        if any(k.startswith(tracked_prefixes) for k in logs):
             train_stats.append(
-                {k: v for k, v in logs.items() if k.startswith("train_ovm/")}
+                {k: v for k, v in logs.items() if k.startswith(tracked_prefixes)}
             )
+
+        # SAPR version boundary: freeze the current online policy, run random
+        # local-intervention probes on fresh seeded environments, and move the
+        # KL weight one smooth step. Probe rollouts count towards the
+        # interaction budget; the probe seed advances with the version so
+        # successive boundaries draw independent interventions.
+        if sapr is not None and sapr.due(t_env):
+            probe_stats = probe_prior_utility(
+                lambda seed: make_env(cfg, seed=seed),
+                learner,
+                sapr.settings,
+                seed_base=sapr.settings.probe_seed_base + 1000 * sapr.version,
+                gamma=float(learner.gamma),
+            )
+            if probe_stats["valid"]:
+                ctrl_logs = sapr.update(probe_stats["mu_hat"], probe_stats["s_hat"])
+            else:
+                ctrl_logs = sapr.no_update(reason="invalid_estimate")
+            learner.set_prior_weight(sapr.lambda_value)
+            if sapr.settings.count_probe_in_budget:
+                t_env += int(probe_stats["probe_env_steps"])
+                learner.t_env = t_env
+            sapr.last_probe_t = t_env
+            logger.write(
+                {"t_env": t_env}
+                | {
+                    f"sapr/probe/{key}": float(value)
+                    for key, value in probe_stats.items()
+                    if isinstance(value, (int, float))
+                }
+                | ctrl_logs,
+                force=True,
+            )
+
+        # MU-APR meta boundary: snapshot the live learner, run K differentiable
+        # Adam steps on mixed-history batches, evaluate the validation split, and
+        # move z by one Adam step. The virtual parameters are discarded.
+        if muapr is not None and muapr.due(t_env):
+            meta_start = time.perf_counter()
+            try:
+                result = muapr_engine.compute_meta_gradient(
+                    online_buffer, rng, t_env, muapr.z
+                )
+            except Exception as exc:  # keep the run alive; report and continue
+                print(f"[muapr] meta step failed at t_env={t_env}: {exc!r}", flush=True)
+                result = {
+                    "valid": False,
+                    "reason": "exception",
+                    "meta_grad": 0.0,
+                    "meta_loss": 0.0,
+                    "kappa_penalty": 0.0,
+                    "J_val": 0.0,
+                    "stats": {},
+                    "inner_rows": [],
+                    "engine_time_s": 0.0,
+                }
+            if result["valid"]:
+                ctrl_logs = muapr.update(
+                    result["meta_grad"],
+                    t_env=t_env,
+                    meta_loss=result["meta_loss"],
+                    kappa_penalty=result["kappa_penalty"],
+                    J_val=result["J_val"],
+                )
+            else:
+                ctrl_logs = muapr.no_update(result["reason"], t_env=t_env)
+            learner.set_prior_weight(muapr.lambda_value)
+            meta_row = (
+                {"t_env": t_env}
+                | result["stats"]
+                | ctrl_logs
+                | {
+                    "muapr/meta_time_s": float(time.perf_counter() - meta_start),
+                    "muapr/engine_time_s": float(result.get("engine_time_s", 0.0)),
+                    "muapr/val_episodes": float(result.get("val_episodes", 0)),
+                    "muapr/inner_episodes": float(result.get("inner_episodes", 0)),
+                }
+            )
+            logger.write(meta_row, force=True)
+            for inner in result["inner_rows"]:
+                logger.write({"t_env": t_env} | inner, force=True)
+            print(
+                f"[muapr] t_env={t_env} updated={int(bool(result['valid']))} "
+                f"z={muapr.z:.4f} lambda={muapr.lambda_value:.4f} "
+                f"J={result['J_val']:.4f} m={result['meta_grad']:.5f} "
+                f"time={meta_row['muapr/meta_time_s']:.2f}s",
+                flush=True,
+            )
+
         boundary = _periodic_boundary(t_env, ckpt_every, last_ckpt_multiple)
         if boundary is not None:
             last_ckpt_multiple = boundary
@@ -639,28 +878,11 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                         "phase": "online",
                         "transfer_mode": mode,
                         "fork_branch": branch,
+                        **({"sapr": sapr.state_dict()} if sapr is not None else {}),
+                        **({"muapr": muapr.state_dict()} if muapr is not None else {}),
                     },
                     default_name=f"ovm_diag_ckpt_t{boundary * ckpt_every}.pt",
                 )
-
-        # FHJP version boundary: freeze the online parameters, run the two paired
-        # on-policy arms, and retire the proposer if the offline joint behaviour
-        # has no measurable positive value. The 2M evaluation trajectories count
-        # towards the environment-interaction budget.
-        if proposer is not None:
-            boundary_logs, eval_steps = proposer.boundary_logs(t_env)
-            if boundary_logs is not None:
-                proposer.last_version_t = t_env
-                if eval_steps:
-                    t_env += eval_steps
-                    learner.t_env = t_env
-                logger.write(boundary_logs, force=True)
-                if proposer.exited:
-                    print(
-                        f"[fhjp] proposer retired at t_env={t_env} after version "
-                        f"{proposer.version}; continuing with plain online MARL",
-                        flush=True,
-                    )
 
     ckpt_dir = resolve_path(cfg.get("checkpoint_dir"))
     if ckpt_dir:
@@ -686,6 +908,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 "transfer_mode": mode,
                 "fork_branch": branch,
                 **({"road": road.state_dict()} if road is not None else {}),
+                **({"sapr": sapr.state_dict()} if sapr is not None else {}),
+                **({"muapr": muapr.state_dict()} if muapr is not None else {}),
             },
             default_name=f"{stem}_online_{mode}{suffix}_seed{cfg['seed']}.pt",
         )

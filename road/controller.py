@@ -170,10 +170,6 @@ def _check_exclusive(cfg: Dict[str, Any], learner) -> None:
         raise ValueError(
             "road.enabled is mutually exclusive with FSR: both controllers set step_mix"
         )
-    if bool((cfg.get("proposer") or {}).get("enabled", False)):
-        raise ValueError(
-            "road.enabled is mutually exclusive with proposer.enabled (FHJP) in v1"
-        )
     if int(cfg.get("fork_at", -1) or -1) > 0 or cfg.get("resume_fork"):
         raise ValueError(
             "road.enabled does not support fork/resume: the bandit state is not snapshot"

@@ -1,3 +1,5 @@
+> 注：FHJP 算法及其专属报告已于 2026-10-31 删除。本文保留原正文作为历史记录，其中 `fhjp/` 代码路径、`fhjp_*.md` 报告与 FHJP 训练 checkpoint 均已不存在。
+
 # FHJP vs OVMSE vs UOT (auto-generated)
 
 Generated: 2026-10-26 14:16:38

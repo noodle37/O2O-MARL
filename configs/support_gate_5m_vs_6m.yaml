@@ -1,0 +1,98 @@
+# Stage C: does the teammate-support gate repair the offline value memory?
+#
+# One shared offline checkpoint, one recipe, one budget, one evaluation seed.
+# The driver (scripts/run_support_gate_stage_c.sh) changes only these switches:
+#
+#   none   use_ovm=false                           no offline value memory
+#   ovm    use_ovm=true,  gate=off                 ungated OVM (the baseline)
+#   tcvm   use_ovm=true,  gate=on                  memory kept only where the
+#                                                  executed joint action is in
+#                                                  the old team's support
+#   anti   use_ovm=true,  gate=anti                identical gate, inverted
+#                                                  ordering (falsification)
+#
+# The anti arm matters: it spends a similar amount of memory weight as tcvm but
+# puts it on the opposite steps. If tcvm only beats ovm because it applies less
+# memory overall, anti will match it. If the WHERE is what matters, anti must be
+# the worst arm.
+#
+# Budget is deliberately short. Stage A already showed the ungated floor is
+# strongly harmful after the earliest phase, so the arms must separate early if
+# the mechanism works at all, and a 200k run costs a fraction of a full course.
+system_name: "support gate stage C 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 200000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+eval_interval_early: 10000
+eval_interval_late: 10000
+eval_switch_t: 200000
+num_eval_episodes: 64
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/support_gate_stage_c/placeholder
+checkpoint_path: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/support_gate_stage_c/placeholder/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  grad_norm_clip: 10.0
+  target_update_interval: 200
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  softmax_temp: 0.5
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  lambda_memory_end: 0.1
+  lambda_anneal_steps: 200000
+  use_ovm: true
+  support_gate_mode: "off"
+  support_cql_mode: "off"
+  support_cql_normalize_mass: false
+  support_quantile: 0.5
+  support_temp_frac: 0.25
+  support_softmax_temp: 1.0
+  support_calib_batches: 8
+  support_calib_batch_size: 64
+  sequential_explore: true
+  ovm_diag_train_stats: true
+  ovm_diag_stride: 4
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 200000
+  test_interval: 10000
+  use_ovm: true
+
+transfer:
+  mode: ovmse
+
+eval_env_seed: 424242
+
+behaviour_cache_dir: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/behaviour
+
+pv_probe:
+  enabled: false

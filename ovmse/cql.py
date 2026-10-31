@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +19,7 @@ class CQLLossMixin:
         batch: Dict[str, torch.Tensor],
         chosen_qtotals: torch.Tensor,
         mask: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         sample_n = self.num_ood_actions
         actions = batch["actions"]
@@ -44,8 +45,9 @@ class CQLLossMixin:
         random_qtotal = self.mixer(random_q, repeat_state).view(sample_n, bs, ts - 1, 1)
         negative = torch.logsumexp(random_qtotal * chosen_if_avail, dim=0)
         dataset_expec = chosen_qtotals[:, :-1]
-        cql_term = (negative - dataset_expec) * mask
-        return cql_term.sum() / mask.sum().clamp(min=1.0)
+        w = mask if weight is None else mask * weight
+        cql_term = (negative - dataset_expec) * w
+        return cql_term.sum() / w.sum().clamp(min=1e-6)
 
     def _compute_cfcql_loss(
         self,
@@ -53,6 +55,7 @@ class CQLLossMixin:
         batch: Dict[str, torch.Tensor],
         chosen_qtotals: torch.Tensor,
         mask: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         actions = batch["actions"]
         avail = batch["avail_actions"]
@@ -97,5 +100,10 @@ class CQLLossMixin:
             negative_sampling = (negative_sampling * lambda_mask).sum(dim=-1, keepdim=True)
         else:
             negative_sampling = negative_sampling.mean(dim=-1, keepdim=True)
-        cql_term = (negative_sampling - chosen_qtotals[:, :-1]) * mask
-        return cql_term.sum() / mask.sum().clamp(min=1.0)
+        # Normalising by the weighted mass keeps the overall conservatism scale
+        # equal to the unweighted loss, so an arm that moves the weight around is
+        # not also changing how much penalty is applied. The clamp must stay far
+        # below 1 or it would rescale a legitimately fractional mass.
+        w = mask if weight is None else mask * weight
+        cql_term = (negative_sampling - chosen_qtotals[:, :-1]) * w
+        return cql_term.sum() / w.sum().clamp(min=1e-6)

@@ -2,7 +2,7 @@
 # ROAD (adaptive offline/online data mixing) online runs on 2s3z and 5m_vs_6m,
 # one seed per GPU. Both maps of a seed share that seed's GPU.
 #
-# Starting point is identical to the OVMSE / UOT / FHJP arms on each map: the
+# Starting point is identical to the OVMSE / UOT arms on each map: the
 # shared offline checkpoint under checkpoints/ovmse_batch_20261014/<map>_offline/.
 # The online recipe is plain QMIX TD; ROAD only chooses the offline episode
 # fraction for each period (see documentation/road_o2o_marl_migration.md).

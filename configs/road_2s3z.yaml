@@ -1,6 +1,6 @@
 # ROAD (adaptive offline/online data mixing) on 2s3z, online phase only.
 #
-# Same starting point as the OVMSE / UOT / FHJP arms on this map: the shared
+# Same starting point as the OVMSE / UOT arms on this map: the shared
 # offline checkpoint
 #   checkpoints/ovmse_batch_20261014/2s3z_offline/ovmse_paper_seed1_best.pt
 # Only the online seed changes across seeds.

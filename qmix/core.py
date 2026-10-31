@@ -78,7 +78,9 @@ class QMIXCoreMixin:
         for i in range(time_steps):
             reset_mask = resets[i].unsqueeze(0).unsqueeze(-1)
             hidden_state = torch.where(
-                reset_mask, net.initial_state(batch_size, device), hidden_state
+                reset_mask,
+                net.initial_state(batch_size, device),
+                hidden_state,
             )
             output, hidden_state = net(inputs[i], hidden_state)
             outputs.append(output)

@@ -1,0 +1,111 @@
+# VCKR (Validity-Constrained sub-team Knowledge Reuse) on 5m_vs_6m, Medium.
+#
+# Starts from the shared OVMSE offline checkpoint used by the PV arms.
+# The online protocol is the standard 1M-step fine-tuning recipe
+# (configs/pv_base_5m_vs_6m.yaml): 8 rollout envs, 128-episode batch, dense
+# early evaluation, fixed evaluation seed. Only the online seed changes.
+#
+# What is new is the learner:
+#   * offline sub-team units are extracted once from the frozen critic:
+#     mixer Hessian coupling -> size 1..3 candidates, start-domain statistics,
+#     H-step return memory (vckr/knowledge.py);
+#   * every train step re-evaluates each unit's counterfactual advantage under
+#     the current team context and subtracts a TV penalty for complement drift
+#     (vckr/validity.py);
+#   * positive units enter the TD target, negative units are skipped, and a
+#     distilled local gate hands covered agents over to the snippet for H steps
+#     (vckr/learner.py).
+#
+# Offline replay mixing is off so the arm isolates the validity-gated memory.
+system_name: "vckr 5m_vs_6m"
+learner_type: vckr
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 1000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 20000
+eval_interval_early: 5000
+eval_interval_late: 20000
+eval_switch_t: 200000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/vckr_5m_vs_6m/placeholder
+checkpoint_path: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/vckr_5m_vs_6m/placeholder/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  softmax_temp: 0.5
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  lambda_memory_end: 1.0
+  lambda_anneal_steps: 0
+  use_ovm: false
+  sequential_explore: true
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 1000000
+  test_interval: 20000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+  load_offline_nets: true
+
+vckr:
+  horizon: 10
+  max_units: 10
+  unit_sizes: [1, 2, 3]
+  coupling_batches: 8
+  coupling_batch_size: 64
+  coupling_stride: 4
+  min_cohesion_frac: 0.25
+  domain_quantile: 0.9
+  domain_alpha_temp: 0.25
+  require_domain: true
+  policy_temp: 1.0
+  exec_policy_temp: 1.0
+  beta_tv: 0.2
+  temp_frac: 0.5
+  delta_clip: 5.0
+  bonus_scale: 1.0
+  max_selected_units: 2
+  gate_hidden: 64
+  gate_lr: 0.001
+  gate_threshold: 0.5
+  gate_pos_weight: 2.0
+  gate_bias_init: -4.0
+  lock_horizon: 10
+
+ovm_diag:
+  ckpt_every: 100000
+
+eval_env_seed: 424242

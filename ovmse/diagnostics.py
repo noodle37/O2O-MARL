@@ -43,7 +43,7 @@ def ovm_target_stats(
     off_tot: torch.Tensor,
     td_targets: torch.Tensor,
     mask_exp: torch.Tensor,
-    lam: float,
+    lam: float | torch.Tensor,
     *,
     chosen_tot: Optional[torch.Tensor] = None,
     prefix: str = "",
@@ -58,6 +58,10 @@ def ovm_target_stats(
     ovm_targets = torch.maximum(off_tot, td_targets)
     active = (off_tot > td_targets) & (mask > 0.5)
     lift = (ovm_targets - td_targets) * mask
+    # lam may be per-step (a gated weight), in which case the scalar reported
+    # for the interval is its masked mean. Without this the lift diagnostics
+    # describe the ungated floor and cannot tell two gate arms apart.
+    lam_scalar = _masked_mean(lam, mask) if torch.is_tensor(lam) else float(lam)
 
     out: Dict[str, float] = {
         f"{prefix}off_q_mean": _masked_mean(off_tot, mask),
@@ -85,7 +89,7 @@ def ovm_target_stats(
         f"{prefix}effective_target_mean": _masked_mean(
             (1.0 - lam) * td_targets + lam * ovm_targets, mask
         ),
-        f"{prefix}lambda_memory": float(lam),
+        f"{prefix}lambda_memory": lam_scalar,
         f"{prefix}n_transitions": float((mask > 0.5).sum().item()),
     }
     if chosen_tot is not None:

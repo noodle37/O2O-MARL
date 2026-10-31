@@ -21,8 +21,13 @@ class MarlcRNN(torch.nn.Module):
         self.rnn = torch.nn.GRUCell(hidden_dim, hidden_dim)
         self.fc2 = torch.nn.Linear(hidden_dim, n_actions)
 
-    def initial_state(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        return torch.zeros(1, batch_size, self.hidden_dim, device=device)
+    def initial_state(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: Optional[torch.dtype] = None,
+    ) -> torch.Tensor:
+        return torch.zeros(1, batch_size, self.hidden_dim, device=device, dtype=dtype)
 
     def forward(
         self, x: torch.Tensor, hidden_state: Optional[torch.Tensor] = None
@@ -31,8 +36,8 @@ class MarlcRNN(torch.nn.Module):
         if squeeze_time:
             x = x.squeeze(0)
         if hidden_state is None:
-            hidden_state = self.initial_state(x.shape[0], x.device)
-        hidden = hidden_state.reshape(x.shape[0], self.hidden_dim)
+            hidden_state = self.initial_state(x.shape[0], x.device, dtype=x.dtype)
+        hidden = hidden_state.reshape(x.shape[0], self.hidden_dim).to(x.dtype)
         hidden = self.rnn(F.relu(self.fc1(x)), hidden)
         q = self.fc2(hidden)
         new_hidden = hidden.unsqueeze(0)

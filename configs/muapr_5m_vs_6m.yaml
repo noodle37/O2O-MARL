@@ -1,0 +1,103 @@
+# MU-APR-MARL (Meta-Utility Adaptive Prior Regularization) on 5m_vs_6m, online.
+#
+# Same starting point as the SAPR / OVMSE / UOT arms:
+#   checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+# The online student is plain QMIX with the offline-specific terms off:
+#   cql_weight = 0, online_cql_weight = 0, mixing_ratio = 0, use_ovm = false.
+# Every training batch is nevertheless composed as a mixed history
+#   nu_k = 1/2 d_off_ref + 1/2 d_on,k_recent
+# for the frozen-prior KL term; the TD objective is masked to the online tail.
+#
+# The KL weight lambda_k = lambda_ref * exp(z_k) is driven by a meta-gradient on
+# a validation split of recent online episodes (K inner Adam steps, team MC
+# returns, leave-one-out baseline, clipped joint ratio), not by probe estimates.
+system_name: "muapr 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/muapr_5m_vs_6m/seed1
+checkpoint_path: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/muapr_5m_vs_6m/seed1/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+
+muapr:
+  enabled: true
+  # lambda_0 = lambda_ref = SAPR's lambda_base.
+  lambda_ref: 0.1
+  # pi(a | h) = softmax(Q(h, a) / temperature) over legal actions; the same
+  # temperature is used by the KL term and the validation ratio.
+  temperature: 1.0
+  support_floor: 1.0e-8
+  # One meta boundary every 20k env steps, after the buffer has warmed up.
+  interval_steps: 20000
+  start_after_steps: 50000
+  # Inner adaptation: K differentiable Adam steps on mixed-history batches.
+  inner_steps: 4
+  inner_batch_size: 32
+  # nu_k = 1/2 d_off_ref + 1/2 d_on,k_recent.
+  kl_offline_frac: 0.5
+  # Validation split from the most recent online episodes.
+  val_recent_episodes: 64
+  val_episodes: 16
+  # PPO-style joint ratio clipping.
+  ratio_clip: 0.2
+  advantage_normalize: true
+  gamma: 0.99
+  # M(z) = -J_val + (kappa / 2) z^2.
+  kappa: 0.01
+  meta_lr: 0.02
+  meta_beta1: 0.9
+  meta_beta2: 0.999
+  meta_eps: 1.0e-8
+  # lambda in [0.1 * exp(-2), 0.1 * exp(2)] = [0.0135, 0.739].
+  z_clip: 2.0
+  inner_grad_clip: 10.0
+  count_in_budget: false
+
+sapr:
+  enabled: false

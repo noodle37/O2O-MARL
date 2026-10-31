@@ -1,0 +1,94 @@
+# SAPR-MARL (Smooth Adaptive Policy Regularization) on 5m_vs_6m, online phase.
+#
+# Starting point: the shared offline checkpoint used by the O2O arms on this map
+#   checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+# The online student is plain QMIX with the offline-specific terms off:
+#   cql_weight = 0, online_cql_weight = 0, mixing_ratio = 0, use_ovm = false.
+# The only addition is the frozen-prior forward KL regularizer
+#   L_k = L_MARL,k + lambda_k * R_prior,k,
+# whose weight lambda_k is adapted by random local-intervention probes.
+#
+# transfer.mode = full_td keeps the offline weights; load_offline_nets (default
+# true) builds the frozen offline_q_network that supplies pi_off.
+system_name: "sapr 5m_vs_6m"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/sapr_5m_vs_6m/seed1
+checkpoint_path: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/sapr_5m_vs_6m/seed1/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+
+# SAPR-MARL outer loop. Part I is the KL term above; Part II runs random
+# local-intervention probes at every boundary; Part III turns the probe estimate
+# into the next lambda.
+sapr:
+  enabled: true
+  # pi(a | h) = softmax(Q(h, a) / temperature) over legal actions.
+  temperature: 1.0
+  # Uniform mass over legal actions keeps log pi_off finite everywhere.
+  support_floor: 1.0e-8
+  # lambda in [lambda_min, lambda_max], centred on lambda_base.
+  lambda_base: 0.1
+  lambda_min: 0.0
+  lambda_max: 0.5
+  delta_lambda: 0.1
+  # Controller recursions.
+  alpha: 0.5
+  beta: 0.5
+  rho: 0.5
+  eps: 1.0e-8
+  # Probe every 100k training env steps; 30 boundaries over the 3M budget.
+  interval_steps: 100000
+  count_probe_in_budget: true
+  probe_episodes: 32
+  probe_seed_base: 900001
+  probe_behaviour: policy
+  probe_max_attempt_factor: 3.0
+  se_mode: analytic
+  bootstrap_samples: 200

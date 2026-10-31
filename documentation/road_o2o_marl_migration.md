@@ -7,6 +7,8 @@
 
 ---
 
+> 注：本文写作时以 FHJP 实现为基准。FHJP 已于 2026-10-31 移除，文中 `fhjp/` 路径、`configs/fhjp_*.yaml`、`scripts/launch_fhjp.sh` 与 `tests/test_fhjp.py` 仅作历史参考。
+
 ## 0. 一句话定义
 
 **ROAD 把"每个 batch 中离线数据占多少"从固定超参数变成一个在线元决策。** 在线训练被切成若干 period，每个 period 开始时用滑动窗口 UCB 从候选集 $\Lambda$ 中选一个混合比例 $m^k$，并在整个 period 内固定使用。period 结束时，用当前 critic 计算替代奖励 $R_q=\Delta_{\text{off}}-\kappa\Delta_{\text{on}}$ 来更新 bandit。

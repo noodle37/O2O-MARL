@@ -322,7 +322,6 @@ def test_build_controller_rejects_incompatible_configs():
     learner = ShapeQMIX()
     cases = [
         {"road": {"enabled": True}, "learner_type": "fsr"},
-        {"road": {"enabled": True}, "proposer": {"enabled": True}},
         {"road": {"enabled": True}, "fork_at": 100},
         {"road": {"enabled": True}, "resume_fork": "snapshot.pt"},
         {"road": {"enabled": True}, "learner_type": "mac_flow"},
