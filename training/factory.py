@@ -18,8 +18,6 @@ from ovmse.learner import PaperQMIXLearner
 from qmix.core import QMIXBase
 from sim2o.learner import Sim2OLearner
 from uot.learner import UOTLearner
-from vckr.knowledge import VCKRParams
-from vckr.learner import VCKRLearner
 from uot.support import RecordedJoints, StateSupport
 from utils.logger import JsonlLogger, WandbLogger
 from utils.paths import VAULT_DIR
@@ -253,38 +251,6 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             random_agent_order=bool(s2o.get("random_agent_order", True)),
             seed=int(cfg["seed"]),
             device=str(sys_cfg.get("device", "cuda")),
-        )
-    if learner_type == "vckr":
-        return VCKRLearner(
-            n_agents=s.n_agents,
-            n_actions=s.n_actions,
-            obs_dim=s.obs_dim,
-            state_dim=s.state_dim,
-            linear_layer_dim=int(sys_cfg.get("linear_layer_dim", 64)),
-            recurrent_layer_dim=int(sys_cfg.get("recurrent_layer_dim", 64)),
-            mixer_embed_dim=int(sys_cfg.get("mixer_embed_dim", 32)),
-            mixer_hyper_dim=int(sys_cfg.get("mixer_hyper_dim", 64)),
-            learning_rate=float(sys_cfg.get("learning_rate", 1e-3)),
-            gamma=float(sys_cfg.get("discount", 0.99)),
-            td_lambda=float(sys_cfg.get("td_lambda", 0.6)),
-            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 10.0)),
-            target_update_interval=int(sys_cfg.get("target_update_interval", 200)),
-            batch_size_run=int(cfg.get("batch_size_run", 1)),
-            add_agent_id_to_obs=bool(sys_cfg.get("add_agent_id_to_obs", True)),
-            raw_cql=False,
-            moderate_lambda=False,
-            cql_weight=0.0,
-            online_cql_weight=0.0,
-            num_ood_actions=int(sys_cfg.get("num_ood_actions", 100)),
-            softmax_temp=float(sys_cfg.get("softmax_temp", 5.0)),
-            max_behaviour_filled_steps=int(sys_cfg.get("max_behaviour_filled_steps", 500_000)),
-            use_ovm=False,
-            mixing_ratio=0.0,
-            lambda_memory_end=1.0,
-            lambda_anneal_steps=0,
-            ovm_diag_train_stats=False,
-            device=str(sys_cfg.get("device", "cuda")),
-            vckr_params=VCKRParams.from_cfg(cfg),
         )
     if learner_type != "ovmse_paper":
         raise ValueError(f"Unknown learner_type {learner_type!r}")

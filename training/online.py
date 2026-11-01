@@ -399,15 +399,6 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 mixer_reinit_seed=mixer_seed,
             )
 
-    # VCKR extracts its offline sub-team dictionary once, after the frozen
-    # offline critic is in place and before any interaction starts.
-    if hasattr(learner, "setup_vckr"):
-        vckr_info = learner.setup_vckr(offline_data, cfg)
-        logger.write(
-            vckr_info
-            | {"t_env": 0, "evaluation/training_steps": 0, "transfer/mode": mode},
-            force=True,
-        )
     rollout_policy = learner
     # ROAD outer controller: picks the offline episode fraction for each period.
     # The inner learner, batch construction and mixer are unchanged.
