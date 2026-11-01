@@ -1,7 +1,9 @@
-# ROAD 迁移到 QMIX 在线微调框架（O2O MARL）
+# MaROAD：ROAD 迁移到 QMIX 的 O2O MARL 实现
 
-> 原文：*ROAD: Adaptive Data Mixing for Offline-to-Online Reinforcement Learning via Bi-Level Optimization*（Yang et al., arXiv:2605.14497）。
-> 本文档是迁移规范：把单智能体 ROAD 改写为 MARL 版本，并给出可直接接入 `training/online.py` 的实现步骤、参数、测试和实验计划。
+> 原文：*ROAD: Adaptive Data Mixing for Offline-to-Online Reinforcement Learning via Bi-Level Optimization*（Yang et al., IJCAI 2026, arXiv:2605.14497）。
+> 本文档是迁移规范：把单智能体 ROAD 改写为 **MaROAD**（ROAD for Multi-Agent），并给出可直接接入 `training/online.py` 的实现步骤、参数、测试和实验计划。
+>
+> **命名约定。** 正文与图表统一写 **MaROAD**；**ROAD** 仅指原论文的单智能体方法。附录给出定义：MaROAD 是 ROAD 在 QMIX / O2O MARL 中的迁移版本。代码包 `road/`、配置文件名 `configs/road_*.yaml`、日志前缀 `road/*` 与启动脚本 `scripts/launch_road.sh` 保留短名，以兼容已有产物与分析脚本。
 >
 > 标注 **[待核对]** 的条目在原文 HTML 版中描述不完整，实现前需对照 PDF 正文/附录确认；标注 **[迁移设计]** 的条目是原文没有、为 MARL 场景新增的决定。
 
@@ -13,11 +15,11 @@
 
 **ROAD 把"每个 batch 中离线数据占多少"从固定超参数变成一个在线元决策。** 在线训练被切成若干 period，每个 period 开始时用滑动窗口 UCB 从候选集 $\Lambda$ 中选一个混合比例 $m^k$，并在整个 period 内固定使用。period 结束时，用当前 critic 计算替代奖励 $R_q=\Delta_{\text{off}}-\kappa\Delta_{\text{on}}$ 来更新 bandit。
 
-迁移到本框架后只有两处变化：
-- 每个 gradient step 的 `step_mix`（离线 episode 占比）由 ROAD 控制器给出；
+**MaROAD** 是本框架中的迁移版本。相对于原文只有两处变化：
+- 每个 gradient step 的 `step_mix`（离线 episode 占比）由 MaROAD 控制器给出；
 - 每个 period 末多做两次无梯度 QMIX 前向，用来计算 $\Delta_{\text{off}}$ 和 $\Delta_{\text{on}}$。
 
-离线阶段、learner、损失函数、mixer 都**不改**。
+离线阶段、learner、损失函数、mixer 都**不改**。核心 MaROAD 严格使用原文的 $R_q$ 定义（不做奖励归一化），也不屏蔽探索步；这两项仅作为附录消融保留开关。
 
 ---
 
@@ -87,9 +89,9 @@ $$
 | $c$ | 2.0 |
 | $\tau$ | 1000 个 period（Antmaze 另设） |
 | 基座算法 | 以 IQL 为主；另测试 CQL、Cal-QL、PEX，即插即用 |
-| period 长度 | "episode 或固定步数" **[待核对：具体步数、每 period 的梯度步数]** |
-| $R_q$ 归一化 | **[待核对]**，HTML 版未见 |
-| $R_q$ 取值方式 | 取 period 末的水平值，还是相对 period 初的增量 **[待核对]** |
+| period 长度 | "episode 或固定步数"；本实现取 $P$ 个梯度步（MARL 超参数，见 3.6） |
+| $R_q$ 归一化 | 原文直接使用原始 $R_q$；本实现默认 `normalize_reward: false` |
+| $R_q$ 取值方式 | 每个 period 末记录**该 period 所用臂**的 $R_q$ 水平值，并记入滑动窗 |
 
 ---
 
@@ -106,7 +108,7 @@ $$
 | $\mathcal D_{\text{on}}$ | `online_buffer`，即 `deque(maxlen=buffer_size)` |
 | $m$ | 训练 batch 中**离线 episode** 的占比，与现有 `step_mix` 同义 |
 | $k$ / $P$ | period 序号 / 每个 period 包含的梯度步数 |
-| $e_t$ | 时间步 $t$ 是否有任一 agent 执行了 ε 探索动作 |
+| $e_t$ | 时间步 $t$ 是否有任一 agent 执行了 ε 探索动作（仅诊断与附录变体使用） |
 
 ---
 
@@ -114,7 +116,7 @@ $$
 
 ### 3.1 什么保持不变
 
-ROAD 只是外层数据调度器，内层"基座算法在混合数据上的更新"原样复用：
+MaROAD 只是外层数据调度器，内层"基座算法在混合数据上的更新"原样复用：
 
 | 原文组件 | 本框架对应 |
 |---|---|
@@ -127,7 +129,7 @@ ROAD 只是外层数据调度器，内层"基座算法在混合数据上的更�
 
 单智能体里，$a\sim\pi_\theta$ 来自 actor（IQL 的 AWR 策略）或 critic 的 argmax。QMIX 没有显式 actor，策略就是对 $Q_{\text{tot}}$ 的贪心。
 
-- **求解方式。** 联合动作空间是 $\prod_i|\mathcal A_i|$，但 `QMixer` 对每个 $Q^i$ 单调，所以 $\arg\max_{\mathbf a}Q_{\text{tot}}=(\arg\max_{a^i}Q^i)_i$ 是精确解，不需要搜索。若以后换成非单调 mixer（例如 QPLEX 的 attention 部分或非单调 critic），这一步需要改成近似搜索，可参考 `sim2o/cbs.py`。
+- **求解方式。** 联合动作空间是 $\prod_i|\mathcal A_i|$，但 `QMixer` 对每个 $Q^i$ 单调，所以 $\arg\max_{\mathbf a}Q_{\text{tot}}=(\arg\max_{a^i}Q^i)_i$ 是精确解，不需要搜索。若以后换成非单调 mixer（例如 QPLEX 的 attention 部分或非单调 critic），这一步需要改成近似搜索。
 - **合法动作。** argmax 必须用 `avail_actions` 屏蔽非法动作，做法与 `ovmse/learner.py` 中 `mac_sel` 相同（填 `-9999999`）。
 - **用贪心而非 soft-greedy。** 部署与评估都用 ε=0 的贪心策略，所以 $\Delta$ 中的 $\pi_\theta$ 取贪心策略。由此有一个有用的性质：
 
@@ -149,22 +151,24 @@ $$
 
 $w_{b,t}$ 的定义：
 - 对离线 batch，$w$ 就是训练用的 `mask`（`filled` 且未在终止之后）；
-- 对在线 batch，$w$ 在此基础上再乘 $(1-e_{b,t})$，见 3.4。
+- 对在线 batch，核心 MaROAD 使用同一个 `mask`（不区分探索步）；附录变体 `mask_explored: true` 再乘 $(1-e_{b,t})$，见 3.4。
 
 两个 $Q_{\text{tot}}$ 都用**当前网络**（`q_network` + `mixer`），不用 target 网络，与原文的 $Q_\phi$ 一致。
 
-### 3.4 探索对 $\Delta_{\text{on}}$ 的污染 **[迁移设计，必须处理]**
+### 3.4 探索步：核心 MaROAD 不屏蔽 **[迁移设计]**
 
-原文假设在线数据"近似 on-policy"，但本框架的在线数据来自 ε-greedy，而且现有配置 `eps_start=1.0` 会让初期数据接近均匀随机。对被探索的步，$Q_{\text{tot}}(\mathbf a^\star)-Q_{\text{tot}}(\mathbf a^{\mathcal D})$ 反映的是"随机动作有多差"，与高估无关。这会让 $\Delta_{\text{on}}$ 系统性偏大，并随 ε 衰减而漂移。
+原文假设在线数据"近似 on-policy"，但本框架的在线数据来自 ε-greedy，而且现有配置 `eps_start=1.0` 会让初期数据接近均匀随机。对被探索的步，$Q_{\text{tot}}(\mathbf a^\star)-Q_{\text{tot}}(\mathbf a^{\mathcal D})$ 反映的是"随机动作有多差"，与高估无关，会让 $\Delta_{\text{on}}$ 系统性偏大，并随 ε 衰减而漂移。
 
-处理方式：
+**核心 MaROAD 仍按原文计算 $\Delta_{\text{on}}$，不屏蔽探索步**（默认 `mask_explored: false`）。理由是屏蔽会改变 $\Delta_{\text{on}}$ 的估计对象：它从"当前 critic 对实际在线分布的优势"变成"对当时贪心动作的优势"，不再是 ROAD 的直接迁移。为保证可分析性，仍然记录探索标志并输出 `road/explored_frac_on`。
 
-1. 在 `qmix/policy.py::select_actions_eval` 的探索分支（`explore_here=True`）记录一个 per-agent 的 `explored` 标志。由 `training/rollout.py::collect_parallel` 写入 step dict，再由 `stack_episodes` 堆成 `batch["explored"] [B,T,1]`，表示该步是否有任一 agent 探索。
+**附录变体。** 设置 `mask_explored: true` 时，在 $\Delta_{\text{on}}$ 的 mask 上再乘 $(1-e_{b,t})$：
+
+1. 在 `qmix/policy.py::select_actions_eval` 的探索分支（`explore_here=True`）记录 per-agent 的 `explored` 标志，由 `training/rollout.py::collect_parallel` 写入 step dict，再由 `stack_episodes` 堆成 `batch["explored"] [B,T,1]`；
 2. 计算 $\Delta_{\text{on}}$ 时屏蔽 $e_t=1$ 的时间步。
 
-屏蔽之后，$\Delta_{\text{on}}$ 的语义收敛为：**当前 critic 想选的联合动作与"当时的贪心动作"之间的价值差**，即策略漂移乘以价值差。对近期数据，它在 critic 稳定时接近 0；critic 高估某些新动作时它会增大。这正是 ROAD 想用来惩罚的信号。
+屏蔽之后，$\Delta_{\text{on}}$ 的语义收敛为"当前 critic 与当时贪心动作之间的价值差"，可用来单独检验探索污染的影响。该变体只放附录，不进入正文主结果。
 
-`explored` 字段只用于诊断，不进入训练损失。离线数据没有这个字段，`merge_offline_online` 只合并两边都有的 key（`training/rollout.py:178`），因此不受影响。
+`explored` 字段只用于诊断与附录变体，不进入训练损失。离线数据没有这个字段，`merge_offline_online` 只合并两边都有的 key（`training/rollout.py:178`），因此不受影响。
 
 ### 3.5 episode 级采样与 transition 级占比 **[迁移设计]**
 
@@ -172,6 +176,8 @@ $w_{b,t}$ 的定义：
 
 - 臂的定义仍按 episode 占比，与现有 `mixing_ratio` 语义一致，避免改动 batch 构造。
 - 额外记录有效 transition 占比：`road/eff_offline_frac = filled_off.sum() / filled_all.sum()`，用于事后解释。
+
+正文与附录需明确这一差异：**MaROAD 的候选臂控制的是 offline episode fraction**，而原文的 $m$ 是 transition 占比；实际 transition 占比以 `road/eff_offline_frac` 记录，不参与 bandit 决策。
 
 ### 3.6 period 与时间尺度 **[迁移设计]**
 
@@ -187,37 +193,39 @@ $w_{b,t}$ 的定义：
 - **$\tau$ 以 period 计**，默认 $\tau=200$，约覆盖最近 2000 个梯度步；
 - 全程约 $10^3$ 个 period，每个臂平均被尝试约 200 次。
 
-### 3.7 $R_q$ 的尺度 **[迁移设计]**
+### 3.7 $R_q$ 的尺度：默认不归一化 **[迁移设计]**
 
-原文 $c=2.0$ 隐含了 $R_q$ 的量级。SMAC 的回报被归一化到约 20，$Q_{\text{tot}}$ 的量级随地图和训练阶段变化，所以直接用原始 $R_q$ 时，$c$ 的含义会随地图漂移。默认做法：
+原文的 UCB 直接使用 $R_q=\Delta_{\text{off}}-\kappa\Delta_{\text{on}}$，没有对奖励做归一化；$c=2.0$ 就是相对于这个尺度设定的。**核心 MaROAD 保持原文做法**，默认 `normalize_reward: false`，UCB 更新使用原始 $R_q$。
+
+可选变体（附录）：若跨地图比较时担心 $Q_{\text{tot}}$ 量级漂移，可对滑动窗口内的 $R_q$ 做 z-score，
 
 $$
-\tilde R_q^k=\frac{R_q^k-\mu_W}{\sigma_W+\epsilon}
+\tilde R_q^k=\frac{R_q^k-\mu_W}{\sigma_W+\epsilon},
 $$
 
-$\mu_W$ 和 $\sigma_W$ 是滑动窗口内所有臂的 $R_q$ 的均值和标准差，UCB 使用 $\tilde R_q$。消融版本可以用原始 $R_q$。日志同时记录原始值和归一化值。
+其中 $\mu_W$ 和 $\sigma_W$ 是窗口内所有臂的 $R_q$ 的均值和标准差。该变体只用于附录的尺度敏感性分析，不进入正文主结果。日志始终同时记录 `road/r_q` 与 `road/r_q_norm`（未开启归一化时二者相等）。
 
 ### 3.8 和本框架既有机制的关系
 
 | 机制 | 关系 |
 |---|---|
-| FSR（`fsr/learner.py::support_mix_ratio`） | 同样动态决定 `step_mix`，但依据是 flow 支撑度。**与 ROAD 互斥**，同时启用时直接报错 |
-| FHJP（`fhjp/`） | 改变的是行为策略，ROAD 改变的是训练 batch，两者正交。v1 先**互斥**，避免实验因素混杂 |
-| OVM（`transfer.mode: ovmse`） | OVM 改 TD 目标，ROAD 改数据。主实验用 `transfer.mode: full_td`，即纯 TD，对应原文的"基座 + ROAD"；OVM + ROAD 作为扩展 |
+| FSR（`fsr/learner.py::support_mix_ratio`） | 同样动态决定 `step_mix`，但依据是 flow 支撑度。**与 MaROAD 互斥**，同时启用时直接报错 |
+| FHJP（`fhjp/`，已移除） | 改变的是行为策略，MaROAD 改变的是训练 batch，两者正交；FHJP 已从代码库移除，此处仅保留设计记录 |
+| OVM（`transfer.mode: ovmse`） | OVM 改 TD 目标，MaROAD 改数据。主实验用 `transfer.mode: full_td`，即纯 TD，对应原文的"基座 + ROAD"；OVM + MaROAD 作为扩展 |
 | 在线 CQL（`online_cql_weight`） | 对应原文的 CQL 基座。默认 0；设为大于 0 时，CQL 项只作用于同一混合 batch |
 | PEXM（`training/pexm.py::ThompsonReturnSelector`） | 也是 bandit，但选择的是 episode 级行为策略，奖励是回报。实现可参考其写法，但不共用代码 |
-| fork / resume（`fork_at` 等） | v1 不支持 ROAD 的 bandit 状态快照，同时启用时报错 |
+| fork / resume（`fork_at` 等） | v1 不支持 MaROAD 的 bandit 状态快照，同时启用时报错 |
 
 ---
 
-## 4. 算法伪代码（MARL-ROAD）
+## 4. 算法伪代码（MaROAD）
 
 ```text
 输入: 离线 checkpoint (θ, ψ) → q_network / mixer；离线数据 D_off；候选 Λ；κ, c, τ, P, B_Δ
 初始化: online_buffer ← ∅；bandit ← SlidingWindowUCB(Λ, c, τ)；k ← 0；m ← bandit.select()
 
 while t_env < t_max:
-    episodes ← collect_parallel(envs, learner, ε(t_env))      # 每步记录 explored
+    episodes ← collect_parallel(envs, learner, ε(t_env))      # 每步记录 explored（仅诊断）
     online_buffer.extend(episodes)
     if |online_buffer| < batch_size: continue
 
@@ -232,13 +240,18 @@ while t_env < t_max:
         with no_grad:
             B_off ← D_off.sample(B_Δ);  B_on ← online_buffer.sample(B_Δ)
             Δ_off ← masked_mean(Qtot(a*) − Qtot(a_D) ; B_off, mask)
-            Δ_on  ← masked_mean(Qtot(a*) − Qtot(a_D) ; B_on,  mask·(1−explored))
+            Δ_on  ← masked_mean(Qtot(a*) − Qtot(a_D) ; B_on,  mask)   # 核心 MaROAD 不屏蔽探索步
+            explored_frac ← mean(explored ; B_on, mask)               # 仅诊断
         R_q ← Δ_off − κ·Δ_on
-        bandit.update(m, normalize(R_q))
+        bandit.update(m, R_q)             # 原始 R_q；附录变体才做窗口 z-score
         k ← k+1; steps_in_period ← 0
-        m ← bandit.select()               # 未被尝试过的臂优先；否则取 SW-UCB argmax
-        log(road/*, force=True)
+        log(road/ratio=m, road/next_ratio=bandit.select(), road/r_q=R_q, ...)  # 三者同一 period
+        m ← road/next_ratio               # 未被尝试过的臂优先；否则取 SW-UCB argmax
 ```
+
+- **奖励与日志对齐。** `bandit.update`、`road/r_q`/`road/delta_*` 与 `road/ratio` 都指**刚刚结束的 period**，即该 period 实际使用的臂 $m^k$；`road/next_ratio` 是 bandit 更新后为下一个 period 选出的臂 $m^{k+1}$。
+- **探索步。** 核心 MaROAD 的 $\Delta_{\text{on}}$ mask 只含 `filled` 与终止掩码；`explored` 只用于 `road/explored_frac_on`。附录变体 `mask_explored: true` 再乘 $(1-e_{b,t})$。
+- **奖励尺度。** 核心 MaROAD 直接使用原始 $R_q$；附录变体 `normalize_reward: true` 对窗口内的 $R_q$ 做 z-score，并以该值更新 bandit。
 
 $\Delta$ 计算的 PyTorch 骨架如下。它只复用 learner 的已有方法，不引入新网络。
 
@@ -275,32 +288,32 @@ def joint_advantage_gap(learner, batch, extra_mask=None):
 
 ### 5.2 修改 `training/online.py`（预计改动 +30 行左右）
 
-1. **构造**：在 FHJP 控制器构造之后（约 L387-416）调用 `road = build_road_controller(cfg, learner)`，并打印 Λ、κ、c、τ、P。
-2. **比例**：在 `step_mix = mixing_ratio` 之后（L523）加入 `if road is not None: step_mix = road.ratio`。其后的 `offline_bs/online_bs` 逻辑不变，`step_mix > 0` 始终成立，因为 $\Lambda$ 中最小为 0.1。
-3. **训练后钩子**：在 `logger.write(train_logs)` 之后（L594）加入：
+1. **构造**：在 learner 与 rollout policy 就绪后（`training/online.py:414`）调用 `road = build_road_controller(cfg, learner)`，并打印 Λ、κ、c、τ、P、`normalize_reward`、`mask_explored`。
+2. **比例**：在 `step_mix = mixing_ratio` 之后（`training/online.py:671-672`）加入 `if road is not None: step_mix = road.ratio`。其后的 `offline_bs/online_bs` 逻辑不变；默认 $\Lambda$ 最小为 0.1，而扩展的 +0 臂会落到已有的 `step_mix == 0` 纯在线分支（`training/online.py:686-706`），无需额外改动。
+3. **训练后钩子**：在 `logger.write(train_logs)` 之后（`training/online.py:768-771`）加入：
    ```python
    if road is not None:
        road_row = road.after_train_step(offline_data, online_buffer, t_env)
        if road_row is not None:
            logger.write(road_row, force=True)
    ```
-   **注意 RNG**：Δ 估计用的采样使用控制器自己的 `np.random.default_rng(seed + road.seed_offset)`，不能使用主循环的 `rng`。否则启用 ROAD 会改变训练 batch 的随机序列，与固定比例基线不可比。
-4. **每步日志**：在 `train_logs` 中加入 `road/ratio` 和 `road/eff_offline_frac`（后者在构造 batch 时由 `filled` 计算）。
-5. **checkpoint**：最终保存时（约 L650-661）在 `extra` 中加入 `"road": road.state_dict()`，内容为 bandit 窗口、各臂累计次数和 period 计数。
+   **注意 RNG**：Δ 估计用的采样使用控制器自己的 `np.random.default_rng(seed + road.seed_offset)`，不能使用主循环的 `rng`。否则启用 MaROAD 会改变训练 batch 的随机序列，与固定比例基线不可比。
+4. **每步日志**：在 `train_logs` 中加入 `road/ratio = step_mix`（本梯度步实际使用的臂）和 `road/eff_offline_frac`（构造 batch 时由 `filled` 计算，实际 transition 占比）。period 行里的 `road/ratio` 则是刚结束 period 的臂，两者在 period 内相等，period 末那一步之后切换。
+5. **checkpoint**：最终保存时（`training/online.py:910`）在 `extra` 中加入 `"road": road.state_dict()`，内容为 bandit 窗口、各臂累计次数、`ratio`、period 计数、`reward_window` 与控制器 RNG 状态。
 
 ### 5.3 修改 rollout 记录 `explored`
 
-- `qmix/policy.py::select_actions_eval`：`collect_parallel`（`training/rollout.py:47`）不传 `trace`，但会传入每条 episode 自己的 `state`，即 `new_episode_state()` 返回的 `{"rnn","last"}`。所以当 `state is not None` 时，把逐 agent 的 `explore_here` 写入 `state["explored"]`（`list[bool]`，按排序后的 agent 顺序）。FHJP 的 `JointProposalPolicy._explore`（`fhjp/proposer.py:217`）目前与 ROAD 互斥，暂不需要同步修改。
+- `qmix/policy.py::select_actions_eval`：`collect_parallel`（`training/rollout.py:47`）不传 `trace`，但会传入每条 episode 自己的 `state`，即 `new_episode_state()` 返回的 `{"rnn","last"}`。所以当 `state is not None` 时，把逐 agent 的 `explore_here` 写入 `state["explored"]`（`list[bool]`，按排序后的 agent 顺序）。
 - `training/rollout.py::collect_parallel`：构造 step dict 时（约 L62）加入 `step["explored"] = np.asarray(states[i].pop("explored", [False]*len(agents)), dtype=bool)`。
 - `training/rollout.py::stack_episodes`：若 step 中有 `explored`，堆叠为 `batch["explored"] [B,T,1]`，表示该步任一 agent 探索过；缺失时不生成该 key。
-- `pv/`、`fhjp/` 以及 snapshot 读写都不受影响，因为新字段只是可选的。
+- `pv/` 以及 snapshot 读写都不受影响，因为新字段只是可选的。`explored` 不进入训练损失；离线数据没有该字段，`merge_offline_online` 只合并两边都有的 key（`training/rollout.py:178`），因此不受影响。
 
 ### 5.4 配置
 
-新增 `configs/road_5m_vs_6m.yaml` 和 `configs/road_2s3z.yaml`。基于 `configs/fhjp_*.yaml` 修改：
-- 删除 `proposer`；
-- 设置 `transfer.mode: full_td` 和 `system.mixing_ratio: 0.0`（该值被 ROAD 覆盖，仅作为保险）；
-- 新增以下块：
+新增 `configs/road_5m_vs_6m.yaml` 和 `configs/road_2s3z.yaml`（原先以 `configs/fhjp_*.yaml` 为模板；FHJP 已移除，现两份配置可直接作为模板）。要点：
+- 不启用 `proposer`；
+- 设置 `transfer.mode: full_td` 和 `system.mixing_ratio: 0.0`（该值被 MaROAD 覆盖，仅作为保险）；
+- 新增以下块，`normalize_reward` 与 `mask_explored` 默认关闭，只有附录消融才打开：
 
 ```yaml
 road:
@@ -311,14 +324,14 @@ road:
   window: 200            # τ，单位 period
   period_steps: 10       # P，每 period 的梯度步数
   delta_batch: 32        # B_Δ，计算 Δ 的 episode 数（离线、在线各一份）
-  normalize_reward: true
-  mask_explored: true
+  normalize_reward: false  # 附录变体：窗口 z-score
+  mask_explored: false     # 附录变体：屏蔽探索步
   seed_offset: 7
 ```
 
 ### 5.5 启动脚本
 
-复制 `scripts/launch_fhjp.sh` 为 `scripts/launch_road.sh`。保留 SEEDS/GPUS/MAPS/PLAN_ONLY 约定、共享离线 checkpoint 检查和"已完成即跳过"逻辑。跳过判定的文件名为 `ovmse_paper_online_full_td_seed<N>.pt`（learner 仍是 `PaperQMIXLearner`），输出目录改为 `checkpoints/road_<map>/seed<N>`。
+`scripts/launch_road.sh`（由已移除的 `launch_fhjp.sh` 派生）保留 SEEDS/GPUS/MAPS/PLAN_ONLY 约定、共享离线 checkpoint 检查和"已完成即跳过"逻辑。`system_name` 写成 `MaROAD <map> seed<N>`；跳过判定的文件名为 `ovmse_paper_online_full_td_seed<N>.pt`（learner 仍是 `PaperQMIXLearner`），输出目录为 `checkpoints/road_<map>/seed<N>`，日志在 `logs/road_batch/`。ROAD 相关代码路径与日志前缀继续沿用 `road/`。
 
 ### 5.6 测试 `tests/test_road.py`
 
@@ -332,10 +345,12 @@ road:
 | Δ 非负 | 随机 Q 和随机合法数据动作下，`joint_advantage_gap >= 0` |
 | Δ 为零 | 数据动作等于逐 agent 合法 argmax 时，`gap == 0` |
 | 非法动作屏蔽 | 非法动作的 Q 极大时，argmax 不会选中它 |
-| explored 屏蔽 | 只有被标记探索的步存在 gap 时，`mask_explored` 后 $\Delta_{\text{on}}=0$ |
+| explored 屏蔽（附录变体） | 只有被标记探索的步存在 gap 时，`mask_explored=True` 后 $\Delta_{\text{on}}=0$；`False` 时 `road/explored_frac_on` 仍被记录 |
+| 默认开关 | 未显式配置时 `normalize_reward` 与 `mask_explored` 均为 `False`，`road/r_q == road/r_q_norm` |
 | period 内比例固定 | 连续 $P$ 次 `after_train_step` 内 `ratio` 不变，第 $P$ 次返回日志行并可能切换 |
-| RNG 隔离 | 启用 ROAD 前后，主循环 `rng` 抽取的 online 下标序列相同 |
-| 互斥 | `road.enabled` 与 `learner_type: fsr`、`proposer.enabled`、`fork_at` 任一同时出现时报错 |
+| period 日志对齐 | period 行中 `road/ratio` 等于该 period 实际使用的臂，`road/next_ratio` 等于更新后的 `road.ratio`，`road/r_q_norm` 是 bandit 实际收到的奖励 |
+| RNG 隔离 | 启用 MaROAD 前后，主循环 `rng` 抽取的 online 下标序列相同 |
+| 互斥 | `road.enabled` 与 `learner_type: fsr`、`fork_at`、resume-fork 任一同时出现时报错 |
 
 ---
 
@@ -343,15 +358,17 @@ road:
 
 | 键 | 频率 | 含义 |
 |---|---|---|
-| `road/ratio` | 每梯度步 | 本步使用的离线 episode 占比 $m^k$ |
-| `road/eff_offline_frac` | 每梯度步 | 有效离线 transition 占比 |
+| `road/ratio` | 每梯度步 | 本步使用的离线 episode 占比。在 period 行中表示**刚结束 period** 所用的臂 $m^k$（与 `road/r_q` 对齐） |
+| `road/next_ratio` | period 末 | bandit 更新后为下一个 period 选出的臂 $m^{k+1}$ |
+| `road/eff_offline_frac` | 每梯度步 | 有效离线 transition 占比，仅用于解释 episode 占比与实际占比的差异 |
 | `road/period` | period 末 | $k$ |
-| `road/delta_off`, `road/delta_on` | period 末 | $\widehat\Delta_{\text{off}}$, $\widehat\Delta_{\text{on}}$ |
-| `road/r_q`, `road/r_q_norm` | period 末 | 原始与归一化的 $R_q$ |
-| `road/ucb_<m>`, `road/count_<m>` | period 末 | 各臂的 UCB 值与窗口内计数 |
-| `road/explored_frac_on` | period 末 | $\Delta_{\text{on}}$ batch 中被屏蔽的时间步比例 |
+| `road/delta_off`, `road/delta_on` | period 末 | $\widehat\Delta_{\text{off}}$, $\widehat\Delta_{\text{on}}$，属于刚结束 period |
+| `road/r_q`, `road/r_q_norm` | period 末 | 原始与归一化后的 $R_q$；`normalize_reward: false` 时二者相等，`r_q_norm` 即 bandit 实际收到的奖励 |
+| `road/ucb_<m>`, `road/count_<m>` | period 末 | 各臂的 UCB 值与窗口内计数（更新后） |
+| `road/explored_frac_on` | period 末 | $\Delta_{\text{on}}$ batch 中探索步占比；无论是否屏蔽都会记录 |
+| `road/window_n`, `road/count_total` | period 末 | 窗口内样本数与各臂累计选择总数 |
 
-`JsonlLogger` 只写入 `force=True` 的行，所以 period 行必须带 `force=True`。每梯度步的字段只进入 wandb；离线分析时用 period 行重建 $m^k$ 的时间序列即可。
+`JsonlLogger` 只写入 `force=True` 的行，所以 period 行必须带 `force=True`。每梯度步的字段只进入 wandb；离线分析时用 period 行重建 $m^k$ 的时间序列即可：`road/ratio` 是该 period 的臂，`road/next_ratio` 给出下一 period 的臂，二者首尾相接可覆盖整个训练过程。
 
 ---
 
@@ -361,31 +378,32 @@ road:
 - 地图：`5m_vs_6m`（主图）和 `2s3z`。
 - 种子：至少 3 个。
 - 所有臂共享同一离线 checkpoint（`ovmse_batch_20261014/<map>_offline/ovmse_paper_seed1_best.pt`）。
-- 其余参数与 `configs/fhjp_*.yaml` 一致：`t_max`、`batch_size=128`、`buffer_size`、ε 调度、`target_update_interval`。
+- 其余参数与 `configs/road_*.yaml` 一致（`t_max`、`batch_size=128`、`buffer_size`、ε 调度、`target_update_interval`），即与现有 OVMSE 在线配置对齐。
 
 **对照组**
 
 | 组 | 配置 |
 |---|---|
-| Online-only | `mixing_ratio: 0.0`，与 FHJP 的基线相同 |
+| Online-only | `mixing_ratio: 0.0`，与 OVMSE / UOT 基线相同 |
 | Fixed-m | `mixing_ratio ∈ {0.1, 0.3, 0.5}` |
-| Decreasing | 0.5 线性降到 0.1。需要一个小钩子，可复用 ROAD 控制器的"固定调度"模式 |
-| ROAD | 本文默认配置 |
-| ROAD κ=0 | 只看 $\Delta_{\text{off}}$ |
-| ROAD κ=∞ | 只看 $-\Delta_{\text{on}}$，实现上取 `kappa: 1e6`，或令 $R_q=-\Delta_{\text{on}}$ |
-| ROAD +0 臂 | $\Lambda=\{0,0.1,\dots,0.5\}$，检验 MARL 下是否会主动退到纯在线 |
-| ROAD 无 explored 屏蔽 | 验证 3.4 节的必要性 |
+| Decreasing | 0.5 线性降到 0.1。需要一个小钩子，可复用 MaROAD 控制器的"固定调度"模式 |
+| MaROAD | 本文默认配置（原始 $R_q$，不屏蔽探索步） |
+| MaROAD κ=0 | 只看 $\Delta_{\text{off}}$ |
+| MaROAD κ=∞ | 只看 $-\Delta_{\text{on}}$，实现上取 `kappa: 1e6`，或令 $R_q=-\Delta_{\text{on}}$ |
+| MaROAD +0 臂 | $\Lambda=\{0,0.1,\dots,0.5\}$，检验 MARL 下是否会主动退到纯在线 |
+| MaROAD 奖励归一化（附录） | `normalize_reward: true`，检验 $Q_{\text{tot}}$ 尺度漂移的影响 |
+| MaROAD 屏蔽探索步（附录） | `mask_explored: true`，检验探索污染 |
 | OVMSE（参考） | 现有 `configs/5m_vs_6m.yaml` 的在线阶段 |
 
 **指标**
 - 训练曲线：`evaluation/win_rate` 和 `evaluation/mean_episode_return`。
 - 最终 640 局评估：`scripts/eval_640.py --episodes 640 --chunk 32`。
 - 初期遗忘深度：前 200k 步内胜率的最低点相对 t=0 的下降。
-- ROAD 机制诊断：$m^k$ 的时间序列与各臂的选择分布；$\Delta_{\text{off}}$、$\Delta_{\text{on}}$ 曲线；`q_bias`（`training/q_metrics.py`）与 $\Delta_{\text{on}}$ 的相关性，用来检验 $\Delta_{\text{on}}$ 能否作为高估代理。
+- MaROAD 机制诊断：$m^k$ 的时间序列与各臂的选择分布；$\Delta_{\text{off}}$、$\Delta_{\text{on}}$ 曲线；`road/explored_frac_on` 随 ε 衰减的变化；`q_bias`（`training/q_metrics.py`）与 $\Delta_{\text{on}}$ 的相关性，用来检验 $\Delta_{\text{on}}$ 能否作为高估代理。
 
 **预期与判据**
-- ROAD 的初期遗忘应不深于 Fixed-0.5。
-- ROAD 的最终胜率应不低于 Online-only 和最佳 Fixed-m（配对种子差的 95% 置信区间）。
+- MaROAD 的初期遗忘应不深于 Fixed-0.5。
+- MaROAD 的最终胜率应不低于 Online-only 和最佳 Fixed-m（配对种子差的 95% 置信区间）。
 - 若 bandit 长期均匀分布，即各臂计数差异不显著，说明 $R_q$ 噪声大于臂间差异。此时应先调大 $P$ 和 $B_\Delta$，而不是调 $c$。
 
 ---
@@ -393,9 +411,9 @@ road:
 ## 8. 风险与已知局限
 
 1. **$R_q$ 噪声。** $\Delta$ 是两个 $Q_{\text{tot}}$ 之差的均值，样本量为 $B_\Delta$ 条 episode。臂之间的真实差异可能小于估计噪声。应先记录 $\widehat\Delta$ 的 bootstrap 标准差，再决定 $P$ 和 $B_\Delta$。
-2. **信用滞后。** period $k$ 末的 critic 状态累积了此前所有臂的影响，$R_q^k$ 并不只归因于 $m^k$。原文同样存在这个问题，滑动窗口只能部分缓解。可以对比"水平值"与"相对 period 初的增量"两种 $R_q$（见 1.5 的 [待核对]）。
-3. **Δ_off 被 CQL 预训练抬高。** CQL 会压低数据外的动作，离线 critic 在数据上的 $\mathbf a^{\mathcal D}$ 与 $\mathbf a^\star$ 往往重合，所以 $\Delta_{\text{off}}$ 初期接近 0，之后随在线更新上升。这符合"在信任域内改进"的语义，但量级变化很大，因此 3.7 的归一化是默认开启的。
-4. **单调 mixer 的假设。** 精确的联合 argmax 依赖 QMIX 的单调性。迁移到 MAC-Flow（连续动作、VDN 双 critic）或 Sim2O（OMIGA 骨干）时，需要分别给出 $\mathbf a^\star$ 的定义，例如 flow 策略的采样，或 CBS 搜索出的动作。这些不在 v1 范围内。
+2. **信用滞后。** period $k$ 末的 critic 状态累积了此前所有臂的影响，$R_q^k$ 并不只归因于 $m^k$。原文同样存在这个问题，滑动窗口只能部分缓解。本实现按原文记录 period 末的水平值；若要额外分析归因，可再记录"相对 period 初的增量"。
+3. **Δ_off 被 CQL 预训练抬高。** CQL 会压低数据外的动作，离线 critic 在数据上的 $\mathbf a^{\mathcal D}$ 与 $\mathbf a^\star$ 往往重合，所以 $\Delta_{\text{off}}$ 初期接近 0，之后随在线更新上升。这符合"在信任域内改进"的语义，但量级变化很大。核心 MaROAD 按原文使用原始 $R_q$；若跨地图比较时 $Q_{\text{tot}}$ 尺度漂移明显，可启用 3.7 的窗口 z-score 附录变体。
+4. **单调 mixer 的假设。** 精确的联合 argmax 依赖 QMIX 的单调性。迁移到 MAC-Flow（连续动作、VDN 双 critic）时，需要给出 $\mathbf a^\star$ 的定义，例如 flow 策略的采样。这些不在 v1 范围内。
 5. **离散候选集。** 原文局限中提到的线性混合与离散搜索在这里同样存在。
 6. **计算开销。** 每个 period 增加 2 次 $B_\Delta$ 条 episode 的无梯度 unroll，相对 $P$ 次训练步（每步 128 条 episode，前向加反向）的开销小于 10%。
 
@@ -405,16 +423,18 @@ road:
 
 | 参数 | 状态 | 值 / 候选 |
 |---|---|---|
-| $\Lambda$ | 原文 | $\{0.1,\dots,0.5\}$；扩展加入 0 |
+| $\Lambda$ | 原文 | $\{0.1,\dots,0.5\}$；扩展加入 0。在本实现中表示离线 **episode** 占比 |
 | $\kappa$ | 原文 | 1 |
-| $c$ | 原文 | 2.0（配合归一化的 $R_q$） |
-| $\tau$ | 待定 | 默认 200 个 period；扫描 {50, 200, 1000} |
-| $P$ | 待定 | 默认 10 个梯度步；扫描 {1, 10, 50} |
-| $B_\Delta$ | 待定 | 默认 32 条 episode；扫描 {16, 32, 64} |
-| $R_q$ 归一化 | 待定 | 窗口 z-score（默认）或原始值 |
-| $R_q$ 取值方式 | 待核对原文 | period 末水平值（默认）或增量 |
-| explored 屏蔽 | 迁移设计 | 默认开启 |
+| $c$ | 原文 | 2.0（原文按原始 $R_q$ 的尺度设定） |
+| $\tau$ | MARL 超参数 | 默认 200 个 period；扫描 {50, 200, 1000} |
+| $P$ | MARL 超参数 | 默认 10 个梯度步；扫描 {1, 10, 50} |
+| $B_\Delta$ | MARL 超参数 | 默认 32 条 episode；扫描 {16, 32, 64} |
+| $R_q$ 归一化 | 附录变体 | 默认关闭（原文）；可选窗口 z-score |
+| $R_q$ 取值方式 | 原文 | period 末水平值 |
+| explored 屏蔽 | 附录变体 | 默认关闭（原文）；`mask_explored: true` 仅用于消融 |
 | 基座 | 迁移设计 | `full_td`（默认），以及 `online_cql_weight > 0` |
+
+$\tau$、$P$、$B_\Delta$ 在原文中没有可直接照搬的步数（period 长度是"episode 或固定步数"），它们由本框架"每轮采集 8 条 episode、1 次梯度步"的节奏决定，因此按 MARL 超参数记录并在附录中扫描。
 
 ---
 
@@ -424,3 +444,27 @@ road:
 - 不做 per-agent 的混合比例。原文只有一个全局比例；per-agent 混合会破坏 episode 级的联合轨迹一致性，与 QMIX 的中心化训练不兼容。
 - 不做连续化的 $g$（例如梯度型元学习），只实现原文的离散 bandit。
 - v1 不与 FSR、FHJP、fork/resume 组合。
+
+---
+
+## 附录 A：MaROAD 的定义与迁移决策
+
+**定义。** MaROAD 是 ROAD（Yang et al., IJCAI 2026）在 QMIX / O2O MARL 中的迁移版本。它保留 ROAD 的双层数据混合框架——离散候选臂 $\Lambda$、滑动窗口 UCB、替代奖励 $R_q=\Delta_{\text{off}}-\kappa\Delta_{\text{on}}$、period 内臂固定、period 末记录 $(m^k,R_q^k)$——只替换内层学习器与外层统计量的载体：单智能体 FQI 换成 QMIX 的 TD(λ) 更新，$Q_\phi(s,a)$ 换成 $Q_{\text{tot}}(\boldsymbol\tau,\mathbf a,s)$，离线/在线 transition 分布换成离线/在线 episode buffer 上的估计。正文与图表统一写 **MaROAD**；代码包 `road/`、配置 `configs/road_*.yaml`、日志前缀 `road/*` 沿用短名，仅为兼容已有脚本与产物。
+
+**迁移决策。**
+
+| 维度 | ROAD（原文） | MaROAD（本实现） |
+|---|---|---|
+| 内层 learner | IQL / CQL / Cal-QL / PEX 的 FQI | QMIX TD(λ)（`PaperQMIXLearner`），可选在线 CQL |
+| Q 函数 | $Q_\phi(s,a)$ | $Q_{\text{tot}}(\boldsymbol\tau,\mathbf a,s)$，单调 `QMixer` 混合逐 agent $Q^i$ |
+| 策略 $\pi_\theta$ | actor 或 critic argmax | 单调性下逐个 agent 在合法动作集上 argmax |
+| 历史 / 部分可观测 | 通常单步 | RNN 隐状态；单步偏离口径，填充与终止后 mask |
+| 数据单位 | transition | episode（整条轨迹采样） |
+| 臂的含义 | 离线 transition 占比 | 离线 **episode** 占比；实际 transition 占比由 `road/eff_offline_frac` 记录，不参与决策 |
+| 替代奖励 | $R_q$ 原始值 | 同左；默认 `normalize_reward: false` |
+| 在线探索 | 不涉及 | ε-greedy；核心不屏蔽探索步，`explored` 仅用于诊断与附录变体 |
+| period | episode 或固定步数 | $P=10$ 个梯度步 |
+| 滑动窗口 | $\tau=1000$ period | $\tau=200$ period |
+| period 日志 | 记录 $(m^k,R_q^k)$ | `road/ratio=m^k`、`road/r_q=R_q^k`、UCB 更新对象三者对齐；`road/next_ratio=m^{k+1}` |
+
+**实现边界。** 代码强制 MaROAD 与 FSR、fork/resume 互斥，并要求 learner 提供 `_forward_qs` 与单调 mixer；MU-APR 已显式拒绝与 MaROAD 同时启用。不实现 per-agent 混合、连续混合比例、非单调 mixer 的联合 argmax、bandit 状态 fork。探索步屏蔽（`mask_explored`）与奖励归一化（`normalize_reward`）作为附录消融保留，默认关闭，与原文的 $R_q$ 定义一致。

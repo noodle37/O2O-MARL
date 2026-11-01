@@ -1,0 +1,75 @@
+# ACKF (Adaptive Cooperative Knowledge Fusion) on 5m_vs_6m, online phase.
+#
+# The frozen offline knowledge encoder and the online QMIX student both start
+# from the shared offline checkpoint used by the other O2O arms on this map:
+#   checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+#
+# The inner learner is plain team-level QMIX TD. ACKF adds
+#   e_off = LN([h_off; q_off])        (frozen encoder)
+#   delta_q = f_xi(e_off, ID)
+#   q_ACKF = q_on + sigmoid(psi_i) * delta_q
+# and trains {theta, phi, xi, psi} with the TD loss; psi uses 0.1x the main lr.
+system_name: "ACKF 5m_vs_6m"
+learner_type: ackf
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/ackf_5m_vs_6m/seed1
+checkpoint_path: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/ackf_5m_vs_6m/seed1/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+  load_offline_nets: true
+
+ackf:
+  # Shared adapter f_xi(e_off, ID): small random init keeps the initial
+  # residual near zero while leaving a non-zero gate gradient.
+  adapter_hidden_dim: 64
+  adapter_init_std: 0.01
+  # g_i = sigmoid(psi_i), psi_i starts at log(0.1 / 0.9).
+  gate_init: 0.1
+  # eta_g = gate_lr_scale * eta_theta.
+  gate_lr_scale: 0.1
+  norm_eps: 1.0e-5

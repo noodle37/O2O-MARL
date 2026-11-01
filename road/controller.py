@@ -39,8 +39,8 @@ class RoadController:
         self.window = int(block.get("window", 200))
         self.period_steps = int(block.get("period_steps", 10))
         self.delta_batch = int(block.get("delta_batch", 32))
-        self.normalize_reward = bool(block.get("normalize_reward", True))
-        self.mask_explored = bool(block.get("mask_explored", True))
+        self.normalize_reward = bool(block.get("normalize_reward", False))
+        self.mask_explored = bool(block.get("mask_explored", False))
         self.seed_offset = int(block.get("seed_offset", 7))
         for name, value in (
             ("window", self.window),
@@ -104,13 +104,16 @@ class RoadController:
 
         delta_off = joint_advantage_gap(self.learner, off_batch)
         extra_mask = None
+        # Always report the exploration share for diagnostics; masking it out is
+        # an appendix variant, not part of the paper's MaROAD reward.
         explored_frac = 0.0
-        if self.mask_explored and "explored" in on_batch:
+        if "explored" in on_batch:
             explored = on_batch["explored"].float()
-            extra_mask = 1.0 - explored
             valid = transition_mask(on_batch)
             denom = valid.sum().clamp(min=1.0)
             explored_frac = float((valid * explored).sum() / denom)
+            if self.mask_explored:
+                extra_mask = 1.0 - explored
         delta_on = joint_advantage_gap(self.learner, on_batch, extra_mask=extra_mask)
         r_q = surrogate_reward(delta_off, delta_on, self.kappa)
 
@@ -123,10 +126,14 @@ class RoadController:
         self.ratio = self.bandit.select()
         self.steps_in_period = 0
 
+        # Align the row with the bandit update: road/r_q and the UCB target
+        # belong to the period that just ended, which ran with `previous`.
+        # road/ratio therefore names the recorded arm, while road/next_ratio is
+        # the arm selected for the next period.
         row: Dict[str, float] = {
             "road/period": float(self.period),
-            "road/ratio": float(self.ratio),
-            "road/prev_ratio": float(previous),
+            "road/ratio": float(previous),
+            "road/next_ratio": float(self.ratio),
             "road/delta_off": float(delta_off),
             "road/delta_on": float(delta_on),
             "road/r_q": float(r_q),

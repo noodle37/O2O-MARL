@@ -99,7 +99,7 @@ start_job() {  # start_job <gpu> <map> <seed>
   CUDA_VISIBLE_DEVICES="$gpu" "$PY" train.py --config "$cfg" \
     phase=online \
     "seed=$seed" \
-    "system_name=road $map seed$seed" \
+    "system_name=MaROAD $map seed$seed" \
     "checkpoint_dir=$dir" \
     "log_path=$dir/online.jsonl" \
     > "$LOGS/${tag}.out" 2>&1 &

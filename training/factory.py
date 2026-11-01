@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 import torch
 
+from ackf.learner import ACKFLearner
 from data.vault_dataset import EpisodeDataset, load_episode_dataset_from_vault
 from data.vault_download import download_and_unzip_vault
 from envs import get_environment
@@ -16,7 +17,6 @@ from macal.learner import MaCalQLLearner
 from macflow.learner import MACFlowLearner
 from ovmse.learner import PaperQMIXLearner
 from qmix.core import QMIXBase
-from sim2o.learner import Sim2OLearner
 from uot.learner import UOTLearner
 from uot.support import RecordedJoints, StateSupport
 from utils.logger import JsonlLogger, WandbLogger
@@ -150,6 +150,34 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             t_embed_frequencies=int(sys_cfg.get("t_embed_frequencies", 8)),
             adam_eps=float(sys_cfg.get("adam_eps", 1e-8)),
         )
+    if learner_type == "ackf":
+        action_mode = str((cfg.get("task") or {}).get("action_mode", "discrete")).lower()
+        if action_mode != "discrete" or s.action_continuous:
+            raise ValueError("ACKF supports discrete actions only")
+        ackf = cfg.get("ackf") or {}
+        lr = float(sys_cfg.get("learning_rate", 1e-3))
+        return ACKFLearner(
+            n_agents=s.n_agents,
+            n_actions=s.n_actions,
+            obs_dim=s.obs_dim,
+            state_dim=s.state_dim,
+            recurrent_layer_dim=int(sys_cfg.get("recurrent_layer_dim", 64)),
+            mixer_embed_dim=int(sys_cfg.get("mixer_embed_dim", 32)),
+            mixer_hyper_dim=int(sys_cfg.get("mixer_hyper_dim", 64)),
+            learning_rate=lr,
+            gamma=float(sys_cfg.get("discount", 0.99)),
+            td_lambda=float(sys_cfg.get("td_lambda", 0.6)),
+            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 10.0)),
+            target_update_interval=int(sys_cfg.get("target_update_interval", 200)),
+            batch_size_run=int(cfg.get("batch_size_run", 1)),
+            add_agent_id_to_obs=bool(sys_cfg.get("add_agent_id_to_obs", True)),
+            adapter_hidden_dim=int(ackf.get("adapter_hidden_dim", 64)),
+            adapter_init_std=float(ackf.get("adapter_init_std", 1e-2)),
+            gate_init=float(ackf.get("gate_init", 0.1)),
+            gate_lr_scale=float(ackf.get("gate_lr_scale", 0.1)),
+            norm_eps=float(ackf.get("norm_eps", 1e-5)),
+            device=str(sys_cfg.get("device", "cuda")),
+        )
     if learner_type == "fsr":
         fsr = cfg.get("fsr") or {}
         return FSRLearner(
@@ -226,30 +254,6 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             alpha_lr=float(sys_cfg.get("alpha_lr", 1e-4)),
             alpha_init=float(sys_cfg.get("alpha_init", 1.0)),
             eps_min=float(sys_cfg.get("eps_min", 0.05)),
-            device=str(sys_cfg.get("device", "cuda")),
-        )
-    if learner_type == "sim2o":
-        s2o = cfg.get("sim2o") or {}
-        return Sim2OLearner(
-            n_agents=s.n_agents,
-            n_actions=s.n_actions,
-            obs_dim=s.obs_dim,
-            state_dim=s.state_dim,
-            recurrent_layer_dim=int(sys_cfg.get("recurrent_layer_dim", 256)),
-            mixer_hyper_dim=int(sys_cfg.get("mixer_hyper_dim", 64)),
-            learning_rate=float(sys_cfg.get("learning_rate", 5e-4)),
-            gamma=float(sys_cfg.get("discount", 0.99)),
-            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 10.0)),
-            target_update_interval=int(sys_cfg.get("target_update_interval", 200)),
-            batch_size_run=int(cfg.get("batch_size_run", 1)),
-            add_agent_id_to_obs=bool(sys_cfg.get("add_agent_id_to_obs", True)),
-            alpha=float(s2o.get("alpha", 10.0)),
-            beam_width=int(s2o.get("beam_width", 5)),
-            temperature=float(s2o.get("temperature", 5.0)),
-            target_tau=float(s2o.get("target_tau", 0.005)),
-            eval_greedy=bool(s2o.get("eval_greedy", True)),
-            random_agent_order=bool(s2o.get("random_agent_order", True)),
-            seed=int(cfg["seed"]),
             device=str(sys_cfg.get("device", "cuda")),
         )
     if learner_type != "ovmse_paper":

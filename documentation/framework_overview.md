@@ -8,14 +8,14 @@
 
 ## 2. 代码结构
 
-代码分四层：共享组件在 `qmix/`，算法实现在 `ovmse/`、`macal/`、`macflow/`、`fsr/`、`sim2o/`、`uot/`，训练流程在 `training/`，数据与环境在 `data/`、`envs/`。`utils/` 放路径、checkpoint 和日志，`configs/` 放全部实验配置，`scripts/` 放串联离线-在线-评估的脚本。
+代码分四层：共享组件在 `qmix/`，算法实现在 `ovmse/`、`macal/`、`macflow/`、`fsr/`、`uot/`，训练流程在 `training/`，数据与环境在 `data/`、`envs/`。`utils/` 放路径、checkpoint 和日志，`configs/` 放全部实验配置，`scripts/` 放串联离线-在线-评估的脚本。
 
 | 目录 | 内容 |
 |---|---|
 | `qmix/` | QMIX 系列共用的组件：`MarlcRNN` agent network、`QMixer`、episode unroll 与 obs 增广（`core.py`）、epsilon-greedy 评估策略（`policy.py`） |
 | `ovmse/` | OVMSE 复现：TD(λ) target（`targets.py`）、MACQL / CFCQL 保守损失（`cql.py`）、behaviour cloning（`behaviour.py`）、离线价值记忆 OVM（`ovm.py`）、迁移消融（`transfer.py`）、诊断（`diagnostics.py`） |
 | `macal/` | MaCal-QL：Monte Carlo return-to-go（`returns.py`）、Cal-QL 校准保守损失（`calql.py`）、learner（`learner.py`） |
-| `macflow/`、`fsr/`、`sim2o/`、`uot/` | 其它研究算法（联合流策略蒸馏、流支撑重放、Sim2O、UOT），本文不展开 |
+| `macflow/`、`fsr/`、`uot/` | 其它研究算法（联合流策略蒸馏、流支撑重放、UOT），本文不展开 |
 | `training/` | 训练流程：`factory.py` 按配置构造 learner / 环境 / logger，`offline.py` 和 `online.py` 是两个阶段的循环，`rollout.py` 负责并行采集，`evaluation.py` 和 `q_metrics.py` 做评估与 Q 值诊断 |
 | `data/` | vault 下载与 episode 数据集加载 |
 | `envs/` | 环境工厂和各环境 wrapper（SMAC v1/v2、MAMuJoCo、MPE、RWARE、Flatland 等） |
@@ -34,7 +34,7 @@ agent network 在所有 agent 间共享参数：只有一个 `MarlcRNN` 实例�
 入口是 `python train.py --config <yaml>`，默认 `phase: offline`。流程如下：
 
 1. `load_vault_dataset` 先看 `vaults/` 下有没有数据，没有就从 HuggingFace 下载（支持 `HF_ENDPOINT` 镜像），然后加载并打印统计；
-2. `build_learner` 按 `learner_type` 构造 learner，可选 `ovmse_paper`、`macal_ql`、`mac_flow`、`fsr`、`sim2o`、`uot`；
+2. `build_learner` 按 `learner_type` 构造 learner，可选 `ovmse_paper`、`macal_ql`、`mac_flow`、`fsr`、`uot`；
 3. 开了 `moderate_lambda` 时（OVMSE 的 CFCQL 需要 behaviour policy），主循环前先训 behaviour cloning 网络，步数上限由 `max_behaviour_filled_steps` 控制，结果缓存到 `behaviour_cache_dir`；
 4. 主循环每跨过 `test_interval` 个 env step，就在真实环境里用 greedy 策略评估 `num_eval_episodes` 局并写日志；平均回报刷新纪录就存 best checkpoint。之后从数据集采 `batch_size` 条 episode 做一次梯度更新，`t_env` 按这批 episode 的填充步数累加。设 `count_updates: true` 时改为按梯度步数计数，用于以 update 数为单位的实验协议；
 5. `t_max` 用完做最后一次评估，存 best 和 final 两个 checkpoint。

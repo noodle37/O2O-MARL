@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
+from ackf.learner import ACKFLearner
 from data.vault_dataset import print_dataset_stats
 from fsr.learner import FSRLearner
 from macal.learner import MaCalQLLearner
@@ -42,8 +43,6 @@ def offline_checkpoint_names(learner_type: str, seed: Any) -> List[str]:
         stem = "mac_flow"
     elif lt == "fsr":
         stem = "fsr"
-    elif lt == "sim2o":
-        stem = "sim2o"
     else:
         stem = "ovmse_paper"
     return [f"{stem}_seed{seed}_best.pt", f"{stem}_seed{seed}.pt"]
@@ -333,6 +332,14 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             force=True,
         )
     else:
+        if isinstance(learner, ACKFLearner):
+            if mode == "scratch":
+                raise RuntimeError("ACKF must start from a pretrained offline QMIX checkpoint")
+            if not bool(transfer_block.get("load_offline_nets", True)):
+                raise RuntimeError(
+                    "ACKF requires the frozen offline encoder; "
+                    "enable transfer.load_offline_nets"
+                )
         ckpt = _resolve_offline_checkpoint(cfg, offline_ckpt)
         payload = torch.load(ckpt, map_location=learner.device, weights_only=False)
 
@@ -398,6 +405,8 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 perm_seed=perm_seed,
                 mixer_reinit_seed=mixer_seed,
             )
+        if hasattr(learner, "prepare_online_start"):
+            learner.prepare_online_start()
 
     rollout_policy = learner
     # ROAD outer controller: picks the offline episode fraction for each period.
@@ -453,6 +462,15 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             support_floor=muapr.settings.support_floor,
         )
         muapr_engine = MetaGradientEngine(learner, muapr.settings, offline_data)
+    if isinstance(learner, ACKFLearner) and (
+        road is not None or sapr is not None or muapr is not None
+    ):
+        raise RuntimeError("ACKF cannot be combined with road, sapr, or muapr")
+    if isinstance(learner, ACKFLearner) and learner.offline_q_network is None:
+        raise RuntimeError(
+            "ACKF requires a frozen offline knowledge encoder; "
+            "enable transfer.load_offline_nets"
+        )
     # Teammate-support gate: theta comes from the quantile of the old team's own
     # deviation distribution on the offline dataset, so "supported" is defined by
     # the offline data rather than by a tuned constant.
@@ -760,7 +778,7 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             road_row = road.after_train_step(offline_data, online_buffer, t_env)
             if road_row is not None:
                 logger.write(road_row, force=True)
-        tracked_prefixes = ("train_ovm/", "support/", "sapr/", "muapr/")
+        tracked_prefixes = ("train_ovm/", "support/", "sapr/", "muapr/", "ackf/")
         if any(k.startswith(tracked_prefixes) for k in logs):
             train_stats.append(
                 {k: v for k, v in logs.items() if k.startswith(tracked_prefixes)}

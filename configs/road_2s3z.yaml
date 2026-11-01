@@ -1,4 +1,9 @@
-# ROAD (adaptive offline/online data mixing) on 2s3z, online phase only.
+# MaROAD (ROAD migrated to QMIX / O2O MARL) on 2s3z, online phase only.
+#
+# In the paper's main-text tables the migrated method is written as MaROAD;
+# ROAD denotes the original single-agent IJCAI'26 method. Code paths, log
+# prefixes (road/*) and this config file name keep the short "road" name for
+# compatibility with existing scripts.
 #
 # Same starting point as the OVMSE / UOT arms on this map: the shared
 # offline checkpoint
@@ -10,7 +15,7 @@
 # mixing_ratio: 0.0 below is a safety fallback and is overridden every step.
 #
 # Spec: documentation/road_o2o_marl_migration.md
-system_name: "road 2s3z"
+system_name: "MaROAD 2s3z"
 seed: 1
 wandb_project: og-marl
 phase: online
@@ -64,9 +69,13 @@ online:
 transfer:
   mode: full_td
 
-# ROAD block. arms are offline *episode* fractions (same meaning as step_mix).
-# window is tau in periods; period_steps is P gradient steps per period;
-# delta_batch is B_Delta episodes sampled for each of Delta_off and Delta_on.
+# MaROAD block. arms are offline *episode* fractions (same meaning as step_mix);
+# road/eff_offline_frac logs the realised transition fraction. window is tau in
+# periods; period_steps is P gradient steps per period; delta_batch is B_Delta
+# episodes sampled for each of Delta_off and Delta_on.
+# The paper's MaROAD reward is R_q = Delta_off - kappa * Delta_on, with no
+# window z-score and no exploration masking. Those two switches are kept for
+# appendix ablations only.
 road:
   enabled: true
   arms: [0.1, 0.2, 0.3, 0.4, 0.5]
@@ -75,6 +84,6 @@ road:
   window: 200
   period_steps: 10
   delta_batch: 32
-  normalize_reward: true
-  mask_explored: true
+  normalize_reward: false
+  mask_explored: false
   seed_offset: 7

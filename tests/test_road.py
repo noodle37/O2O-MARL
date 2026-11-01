@@ -246,8 +246,8 @@ def _controller(learner=None, **block):
         "window": 10,
         "period_steps": 3,
         "delta_batch": 2,
-        "normalize_reward": True,
-        "mask_explored": True,
+        "normalize_reward": False,
+        "mask_explored": False,
         "seed_offset": 7,
     }
     cfg_block.update(block)
@@ -266,10 +266,21 @@ def test_ratio_fixed_within_period_and_row_at_boundary():
     row = road.after_train_step(offline, buffer, 30)
     assert row is not None
     assert row["road/period"] == 1.0
+    # The row describes the period that just ended: its arm, its R_q and the
+    # bandit update target must all refer to the same period.
+    assert row["road/ratio"] == ratio
+    assert row["road/next_ratio"] == road.ratio
+    assert row["road/r_q_norm"] == row["road/r_q"]
     assert road.ratio in road.arms
     assert road.period == 1
     assert road.steps_in_period == 0
     assert "road/delta_off" in row and "road/delta_on" in row
+
+
+def test_reward_normalization_and_exploration_masking_default_off():
+    road = RoadController(ShapeQMIX(), {"arms": [0.1, 0.2]}, seed=1)
+    assert road.normalize_reward is False
+    assert road.mask_explored is False
 
 
 def test_delta_on_is_zero_when_every_step_explored():
@@ -282,10 +293,26 @@ def test_delta_on_is_zero_when_every_step_explored():
             step["explored"] = np.array([True, False])
         episodes.append(episode)
     buffer = deque(episodes)
-    road = _controller(learner)
+    road = _controller(learner, mask_explored=True)
     rows = [road.after_train_step(offline, buffer, t) for t in (10, 20, 30)]
     assert rows[-1]["road/delta_on"] == 0.0
     assert rows[-1]["road/explored_frac_on"] == 1.0
+
+
+def test_explored_share_is_logged_without_masking():
+    learner = ShapeQMIX()
+    offline = FakeOffline(_offline_batch())
+    episodes = []
+    for _ in range(4):
+        episode = _episode()
+        for step in episode["steps"]:
+            step["explored"] = np.array([True, False])
+        episodes.append(episode)
+    road = _controller(learner)
+    rows = [road.after_train_step(offline, deque(episodes), t) for t in (10, 20, 30)]
+    # Core MaROAD keeps explored steps; the share is still reported.
+    assert rows[-1]["road/explored_frac_on"] == 1.0
+    assert rows[-1]["road/delta_on"] > 0.0
 
 
 def test_controller_does_not_touch_the_main_rng():
