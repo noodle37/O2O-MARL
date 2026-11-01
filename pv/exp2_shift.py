@@ -105,6 +105,18 @@ class EpisodeRecord:
     episode_return: float = 0.0
     won: Optional[bool] = None
     length: int = 0
+    perturb_trials: Dict[int, int] = field(default_factory=dict)
+    perturb_events: Dict[int, int] = field(default_factory=dict)
+    perturb_changes: Dict[int, int] = field(default_factory=dict)
+
+
+def _hash_uniform(*values: int) -> float:
+    """FNV-1a hash mapped to [0, 1), so noise is common across conditions."""
+    h = 2166136261
+    for value in values:
+        h ^= int(value) & 0xFFFFFFFF
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h / 4294967296.0
 
 
 def run_episode(
@@ -119,6 +131,8 @@ def run_episode(
     add_agent_id: bool,
     device,
     rng: np.random.Generator,
+    noise_seed: Optional[int] = None,
+    episode_index: int = 0,
 ) -> EpisodeRecord:
     """Roll out one episode with the given per-agent weight sources.
 
@@ -143,6 +157,7 @@ def run_episode(
     obs, info = env.reset()
     record = EpisodeRecord()
     done = False
+    step = 0
     while not done:
         agents = sorted(obs.keys())
         legals = legals_from_info(info, agents)
@@ -164,13 +179,38 @@ def run_episode(
                 q, hidden_live[i] = _forward_agent(live, obs_in, hidden_live[i])
             if legal is not None:
                 q = q[0].masked_fill(~legal, -1e9)
-            action = int(torch.argmax(q).item())
-            if i not in examined and eps_partner > 0.0 and rng.random() < eps_partner:
-                if legal is not None:
-                    legal_idx = torch.nonzero(legal, as_tuple=False).squeeze(-1)
-                    action = int(legal_idx[torch.randint(legal_idx.numel(), (1,))].item())
+            greedy_action = int(torch.argmax(q).item())
+            action = greedy_action
+            if i not in examined and eps_partner > 0.0:
+                record.perturb_trials[i] = record.perturb_trials.get(i, 0) + 1
+                if noise_seed is None:
+                    perturbed = rng.random() < eps_partner
                 else:
-                    action = int(rng.integers(n_actions))
+                    perturbed = (
+                        _hash_uniform(noise_seed, episode_index, step, i, 0) < eps_partner
+                    )
+                if perturbed:
+                    record.perturb_events[i] = record.perturb_events.get(i, 0) + 1
+                    if legal is not None:
+                        legal_idx = torch.nonzero(legal, as_tuple=False).squeeze(-1)
+                        if noise_seed is None:
+                            pick = int(torch.randint(legal_idx.numel(), (1,)).item())
+                        else:
+                            pick = int(
+                                _hash_uniform(noise_seed, episode_index, step, i, 1)
+                                * legal_idx.numel()
+                            )
+                            pick = min(pick, legal_idx.numel() - 1)
+                        action = int(legal_idx[pick].item())
+                    elif noise_seed is None:
+                        action = int(rng.integers(n_actions))
+                    else:
+                        action = int(
+                            _hash_uniform(noise_seed, episode_index, step, i, 1) * n_actions
+                        )
+                        action = min(action, n_actions - 1)
+                    if action != greedy_action:
+                        record.perturb_changes[i] = record.perturb_changes.get(i, 0) + 1
             actions[agent] = action
             if use_offline:
                 last_off[i] = action
@@ -220,6 +260,7 @@ def run_episode(
             record.won = bool(next_info["battle_won"])
         obs, info = next_obs, next_info
         done = all(terminal.values()) or all(trunc.values())
+        step += 1
 
     record.length = len(record.steps)
     return record
