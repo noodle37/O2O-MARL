@@ -1,0 +1,76 @@
+# MaSO2 (SO2 migrated to QMIX / O2O MARL) on 2s3z, online phase only.
+#
+# SO2 is Zhang et al., arXiv:2312.07685. MaSO2 is the QMIX migration.
+# Code paths, the log prefix so2/* and this filename keep the short name.
+#
+# Same offline weights as the other arms on this map:
+#   checkpoints/ovmse_batch_20261014/2s3z_offline/ovmse_paper_seed1_best.pt
+# Online seed is the only seed that changes. The inner update is plain QMIX
+# TD (no OVM, no CQL). MaSO2 adds a perturbed bootstrap action and N_upc
+# gradient steps per collection.
+#
+# Spec: documentation/so2_o2o_marl_migration.md
+system_name: "MaSO2 2s3z"
+learner_type: so2
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 1000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 2
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/so2_2s3z/seed1
+checkpoint_path: checkpoints/ovmse_batch_20261014/2s3z_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/so2_2s3z/seed1/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 2s3z
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 50
+  grad_norm_clip: 1.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.5
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 1000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+
+# Paper defaults: sigma=0.3, clip=0.6, N_upc=10.
+# sigma is the per-agent probability of replacing the greedy bootstrap action.
+# clip is recorded for the paper setting; discrete SMAC has no action metric
+# to apply it as a Euclidean ball. mixing_ratio 0.5 is the episode-level
+# stand-in for sampling from D_off union D_on.
+so2:
+  sigma: 0.3
+  clip: 0.6
+  n_upc: 10

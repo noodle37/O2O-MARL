@@ -56,16 +56,6 @@ Hydra 风格覆盖示例：
 python train.py --config configs/2s3z.yaml seed=2 system.device=cpu
 ```
 
-## 自检
-
-无需 SC2 与数据集：
-
-```bash
-python -m pytest tests/test_smoke.py -q
-# 或
-python tests/test_smoke.py
-```
-
 ## WandB
 
 默认项目名见 yaml 中的 `wandb_project`。首次使用需 `wandb login`。

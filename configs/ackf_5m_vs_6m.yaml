@@ -64,6 +64,8 @@ transfer:
   load_offline_nets: true
 
 ackf:
+  # full | no_adapter | no_gate | unfrozen_encoder
+  variant: full
   # Shared adapter f_xi(e_off, ID): small random init keeps the initial
   # residual near zero while leaving a non-zero gate gradient.
   adapter_hidden_dim: 64

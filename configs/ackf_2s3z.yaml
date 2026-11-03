@@ -57,6 +57,8 @@ transfer:
   load_offline_nets: true
 
 ackf:
+  # full | no_adapter | no_gate | unfrozen_encoder
+  variant: full
   adapter_hidden_dim: 64
   adapter_init_std: 0.01
   gate_init: 0.1

@@ -17,18 +17,27 @@ from macal.learner import MaCalQLLearner
 from macflow.learner import MACFlowLearner
 from ovmse.learner import PaperQMIXLearner
 from qmix.core import QMIXBase
+from so2.learner import SO2Learner
 from uot.learner import UOTLearner
 from uot.support import RecordedJoints, StateSupport
 from utils.logger import JsonlLogger, WandbLogger
 from utils.paths import VAULT_DIR
 
 
-def _build_qmix_cql(cfg: Dict[str, Any], dataset: EpisodeDataset) -> PaperQMIXLearner:
+def _build_qmix_cql(
+    cfg: Dict[str, Any],
+    dataset: EpisodeDataset,
+    learner_cls: type = PaperQMIXLearner,
+    extra_kwargs: Dict[str, Any] | None = None,
+) -> PaperQMIXLearner:
     """QMIX+CQL learner used by the OVMSE paper run."""
     s = dataset.stats
     sys_cfg = cfg["system"]
     use_ovm = bool(sys_cfg.get("use_ovm", False))
-    return PaperQMIXLearner(
+    kwargs: Dict[str, Any] = {}
+    if extra_kwargs:
+        kwargs.update(extra_kwargs)
+    return learner_cls(
         n_agents=s.n_agents,
         n_actions=s.n_actions,
         obs_dim=s.obs_dim,
@@ -64,6 +73,7 @@ def _build_qmix_cql(cfg: Dict[str, Any], dataset: EpisodeDataset) -> PaperQMIXLe
         ovm_diag_train_stats=bool(sys_cfg.get("ovm_diag_train_stats", True)),
         ovm_diag_stride=int(sys_cfg.get("ovm_diag_stride", 4)),
         device=str(sys_cfg.get("device", "cuda")),
+        **kwargs,
     )
 
 
@@ -150,6 +160,18 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             t_embed_frequencies=int(sys_cfg.get("t_embed_frequencies", 8)),
             adam_eps=float(sys_cfg.get("adam_eps", 1e-8)),
         )
+    if learner_type == "so2":
+        so2 = cfg.get("so2") or {}
+        return _build_qmix_cql(
+            cfg,
+            dataset,
+            learner_cls=SO2Learner,
+            extra_kwargs={
+                "pvu_sigma": float(so2.get("sigma", 0.3)),
+                "pvu_clip": float(so2.get("clip", 0.6)),
+                "n_upc": int(so2.get("n_upc", 10)),
+            },
+        )
     if learner_type == "ackf":
         action_mode = str((cfg.get("task") or {}).get("action_mode", "discrete")).lower()
         if action_mode != "discrete" or s.action_continuous:
@@ -171,6 +193,7 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             target_update_interval=int(sys_cfg.get("target_update_interval", 200)),
             batch_size_run=int(cfg.get("batch_size_run", 1)),
             add_agent_id_to_obs=bool(sys_cfg.get("add_agent_id_to_obs", True)),
+            variant=str(ackf.get("variant", "full")),
             adapter_hidden_dim=int(ackf.get("adapter_hidden_dim", 64)),
             adapter_init_std=float(ackf.get("adapter_init_std", 1e-2)),
             gate_init=float(ackf.get("gate_init", 0.1)),

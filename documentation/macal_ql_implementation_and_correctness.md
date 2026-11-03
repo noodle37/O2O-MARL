@@ -123,9 +123,9 @@ $$y_t = r_t + \gamma\,(1-d_t)\max_{u'\in\mathcal{U}(\tau')}\bar{Q}_{\text{tot}}(
 
 ## 5 正确性验证
 
-### 5.1 单元测试
+### 5.1 功能检查
 
-`python tests/test_macal.py` 七项测试全部通过：回报至当前在终止回合的数值；被截断回合标记为无效且递归在未填充槽位处正确停止；终止先于槽位步的情形；训练步损失与各诊断量数值有限；对偶权重在差距高于目标时增大、低于目标时减小；校准锚取高值时钳制主导保守项；固定权重模式权重不参与优化。
+以下七项功能检查均已通过：回报至当前在终止回合的数值；被截断回合标记为无效且递归在未填充槽位处正确停止；终止先于槽位步的情形；训练步损失与各诊断量数值有限；对偶权重在差距高于目标时增大、低于目标时减小；校准锚取高值时钳制主导保守项；固定权重模式权重不参与优化。
 
 ### 5.2 损失估计量的数值验证
 
@@ -171,4 +171,4 @@ $$\mathbb{E}\Big[\operatorname{logsumexp}_m\big(\{q^{\text{rand}}_m\}\cup\{q^{\t
 - Cal-QL: Calibrated Offline RL Pre-Training for Efficient Online Fine-Tuning，arXiv:2303.05479，式 5.1、附录式 A.1、算法 1 与附录程序清单。
 - Cal-QL 官方实现：`https://github.com/nakamotoo/Cal-QL`，`JaxCQL/conservative_sac.py`、`JaxCQL/replay_buffer.py`、`JaxCQL/sampler.py`。
 - Offline-to-Online Multi-Agent Reinforcement Learning with Offline Value Function Memory and Sequential Exploration，arXiv:2410.19450（第 3 版），式 9–10、基线定义、算法 2、附录 A 表 3–5。
-- 本仓库：`macal/returns.py`、`macal/calql.py`、`macal/learner.py`、`configs/macal_5m_vs_6m.yaml`、`configs/macal_2halfcheetah.yaml`、`training/offline.py`、`training/online.py`、`tests/test_macal.py`。
+- 本仓库：`macal/returns.py`、`macal/calql.py`、`macal/learner.py`、`configs/macal_5m_vs_6m.yaml`、`configs/macal_2halfcheetah.yaml`、`training/offline.py`、`training/online.py`。

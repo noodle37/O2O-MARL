@@ -178,7 +178,7 @@ class PaperQMIXLearner(
 
         chosen_q = torch.gather(mac_out, 3, actions.long())
         mac_sel = torch.where(avail, mac_out, torch.tensor(-9999999.0, device=self.device))
-        max_actions = torch.argmax(mac_sel, dim=3, keepdim=True)
+        max_actions = self._select_bootstrap_actions(mac_sel, avail)
         target_max_q = torch.gather(target_mac_out, 3, max_actions)
 
         chosen_tot, target_max_tot, mixed_rew = self._mixing(
@@ -319,7 +319,19 @@ class PaperQMIXLearner(
             **ovm_stats,
             **gate_stats,
             **prior_stats,
+            **getattr(self, "_bootstrap_stats", {}),
         }
+
+    def _select_bootstrap_actions(
+        self, mac_sel: torch.Tensor, avail: torch.Tensor
+    ) -> torch.Tensor:
+        """Action whose target Q bootstraps the TD target. Greedy by default.
+
+        MaSO2 overrides this with a perturbed legal action. Other learners keep
+        the double-Q argmax, including subclasses that do not override it.
+        """
+        self._bootstrap_stats = {}
+        return torch.argmax(mac_sel, dim=3, keepdim=True)
 
     def state_dicts(self) -> Dict[str, Any]:
         return {

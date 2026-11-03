@@ -26,6 +26,7 @@ from ovmse.learner import PaperQMIXLearner
 from ovmse.transfer import apply_transfer
 from road.controller import build_road_controller
 from sapr.controller import build_sapr_controller
+from so2.learner import SO2Learner
 from sapr.probe import probe_prior_utility
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
@@ -466,6 +467,10 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         road is not None or sapr is not None or muapr is not None
     ):
         raise RuntimeError("ACKF cannot be combined with road, sapr, or muapr")
+    if isinstance(learner, SO2Learner) and (
+        road is not None or sapr is not None or muapr is not None
+    ):
+        raise RuntimeError("SO2 cannot be combined with road, sapr, or muapr")
     if isinstance(learner, ACKFLearner) and learner.offline_q_network is None:
         raise RuntimeError(
             "ACKF requires a frozen offline knowledge encoder; "
@@ -510,8 +515,15 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         f"shift={shift} offline_ckpt={ckpt} fork_at={fork_at} branch={branch} "
         f"resume_fork={resume_fork} "
         f"road={'on' if road is not None else 'off'} "
-        f"sapr={'on' if sapr is not None else 'off'}"
+        f"sapr={'on' if sapr is not None else 'off'} "
+        f"so2={'on' if isinstance(learner, SO2Learner) else 'off'}"
     )
+    if isinstance(learner, SO2Learner):
+        print(
+            f"[so2] sigma={learner.pvu_sigma} clip={learner.pvu_clip} "
+            f"n_upc={learner.n_upc}",
+            flush=True,
+        )
     if road is not None:
         print(
             f"[road] arms={road.arms} kappa={road.kappa} c={road.c} "
@@ -673,116 +685,126 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
         if len(online_buffer) < total_batch:
             continue
 
-        # One gradient step per parallel rollout.
+        # One collection, then n_upc gradient steps. Every learner except MaSO2
+        # leaves n_upc at 1, so this loop is a single pass for them. The target
+        # network still advances once per collection (episode_delta on the first
+        # update only). ROAD / SAPR / MU-APR stay outside the loop.
+        n_upc = max(1, int(getattr(learner, "n_upc", 1)))
         episode_delta = batch_size_run
+        logs: Dict[str, float] = {}
         step_mix = mixing_ratio
-        support_info: Dict[str, float] = {}
-        if road is not None:
-            step_mix = road.ratio
-        if isinstance(learner, FSRLearner):
-            probe_idx = rng.choice(len(online_buffer), size=min(total_batch, len(online_buffer)), replace=False)
-            probe = stack_episodes(
-                [online_buffer[int(i)] for i in probe_idx],
+        eff_offline_frac = 0.0
+        kl_offline_frac = 0.0
+        for upc_i in range(n_upc):
+            episode_delta_i = episode_delta if upc_i == 0 else 0
+            step_mix = mixing_ratio
+            support_info: Dict[str, float] = {}
+            if road is not None:
+                step_mix = road.ratio
+            if isinstance(learner, FSRLearner):
+                probe_idx = rng.choice(len(online_buffer), size=min(total_batch, len(online_buffer)), replace=False)
+                probe = stack_episodes(
+                    [online_buffer[int(i)] for i in probe_idx],
+                    offline_data.stats.max_seq_length,
+                    learner.device,
+                )
+                support_info = learner.support_mix_ratio(probe)
+                step_mix = float(support_info.get("fsr/offline_frac", 0.0))
+            if muapr is not None:
+                # Mixed history nu_k = 1/2 d_off_ref + 1/2 d_on,k_recent. TD is
+                # restricted to the online tail below; KL sees both halves.
+                step_mix = float(muapr.settings.kl_offline_frac)
+            if step_mix > 0:
+                offline_bs = int(round(total_batch * step_mix))
+                online_bs = total_batch - offline_bs
+                if online_bs < 1:
+                    online_bs = 1
+                    offline_bs = total_batch - 1
+            else:
+                offline_bs = 0
+                online_bs = total_batch
+            picked = rng.choice(len(online_buffer), size=online_bs, replace=False)
+            online_batch = stack_episodes(
+                [online_buffer[int(i)] for i in picked],
                 offline_data.stats.max_seq_length,
                 learner.device,
             )
-            support_info = learner.support_mix_ratio(probe)
-            step_mix = float(support_info.get("fsr/offline_frac", 0.0))
-        if muapr is not None:
-            # Mixed history nu_k = 1/2 d_off_ref + 1/2 d_on,k_recent. TD is
-            # restricted to the online tail below; KL sees both halves.
-            step_mix = float(muapr.settings.kl_offline_frac)
-        if step_mix > 0:
-            offline_bs = int(round(total_batch * step_mix))
-            online_bs = total_batch - offline_bs
-            if online_bs < 1:
-                online_bs = 1
-                offline_bs = total_batch - 1
-        else:
-            offline_bs = 0
-            online_bs = total_batch
-        picked = rng.choice(len(online_buffer), size=online_bs, replace=False)
-        online_batch = stack_episodes(
-            [online_buffer[int(i)] for i in picked],
-            offline_data.stats.max_seq_length,
-            learner.device,
-        )
-        offline_batch = None
-        if offline_bs > 0:
-            offline_batch = offline_data.sample(offline_bs, rng, device=learner.device)
-            train_batch = merge_offline_online(offline_batch, online_batch, step_mix)
-        else:
-            train_batch = online_batch
-        td_row_mask = None
-        kl_offline_frac = 0.0
-        if muapr is not None:
-            n_off = int(offline_batch["obs"].shape[0]) if offline_batch is not None else 0
-            n_on = int(online_batch["obs"].shape[0])
-            td_row_mask = torch.cat(
-                [
-                    torch.zeros(n_off, device=learner.device),
-                    torch.ones(n_on, device=learner.device),
-                ]
-            )
-            kl_offline_frac = float(n_off / max(n_off + n_on, 1))
-        eff_offline_frac = 0.0
-        if offline_bs > 0:
-            all_filled = train_batch["filled"][..., 0].sum()
-            off_filled = train_batch["filled"][:offline_bs, :, 0].sum()
-            eff_offline_frac = float(off_filled / all_filled.clamp(min=1.0))
-        if isinstance(learner, MaCalQLLearner):
-            logs = learner.train_on_batch(
-                train_batch,
-                t_env=t_env,
-                episode_delta=episode_delta,
-                eps=eps_at(t_env),
-            )
-        elif isinstance(learner, MACFlowLearner):
-            logs = learner.train_on_batch(train_batch, t_env=t_env)
-            if count_updates:
-                t_env += 1
-                learner.t_env = t_env
-        elif isinstance(learner, FSRLearner):
-            logs = learner.train_on_batch(
-                train_batch,
-                cql_weight=online_cql,
-                use_ovm=False,
-                t_env=t_env,
-                episode_delta=episode_delta,
-                offline_bs=offline_bs,
-                support_w_mean=support_info.get("fsr/w_mean"),
-            )
-            logs.update(support_info)
-        else:
-            logs = learner.train_on_batch(
-                train_batch,
-                cql_weight=online_cql,
-                use_ovm=use_ovm,
-                t_env=t_env,
-                episode_delta=episode_delta,
-                td_row_mask=td_row_mask,
-            )
-        train_logs = {
-            **logs,
-            "t_env": t_env,
-            "online_buffer": len(online_buffer),
-            "transfer/mode": mode,
-        }
-        if muapr is not None:
-            train_logs["muapr/kl_offline_frac"] = kl_offline_frac
-        if road is not None:
-            train_logs["road/ratio"] = float(step_mix)
-            train_logs["road/eff_offline_frac"] = eff_offline_frac
-        logger.write(train_logs)
+            offline_batch = None
+            if offline_bs > 0:
+                offline_batch = offline_data.sample(offline_bs, rng, device=learner.device)
+                train_batch = merge_offline_online(offline_batch, online_batch, step_mix)
+            else:
+                train_batch = online_batch
+            td_row_mask = None
+            kl_offline_frac = 0.0
+            if muapr is not None:
+                n_off = int(offline_batch["obs"].shape[0]) if offline_batch is not None else 0
+                n_on = int(online_batch["obs"].shape[0])
+                td_row_mask = torch.cat(
+                    [
+                        torch.zeros(n_off, device=learner.device),
+                        torch.ones(n_on, device=learner.device),
+                    ]
+                )
+                kl_offline_frac = float(n_off / max(n_off + n_on, 1))
+            eff_offline_frac = 0.0
+            if offline_bs > 0:
+                all_filled = train_batch["filled"][..., 0].sum()
+                off_filled = train_batch["filled"][:offline_bs, :, 0].sum()
+                eff_offline_frac = float(off_filled / all_filled.clamp(min=1.0))
+            if isinstance(learner, MaCalQLLearner):
+                logs = learner.train_on_batch(
+                    train_batch,
+                    t_env=t_env,
+                    episode_delta=episode_delta_i,
+                    eps=eps_at(t_env),
+                )
+            elif isinstance(learner, MACFlowLearner):
+                logs = learner.train_on_batch(train_batch, t_env=t_env)
+                if count_updates:
+                    t_env += 1
+                    learner.t_env = t_env
+            elif isinstance(learner, FSRLearner):
+                logs = learner.train_on_batch(
+                    train_batch,
+                    cql_weight=online_cql,
+                    use_ovm=False,
+                    t_env=t_env,
+                    episode_delta=episode_delta_i,
+                    offline_bs=offline_bs,
+                    support_w_mean=support_info.get("fsr/w_mean"),
+                )
+                logs.update(support_info)
+            else:
+                logs = learner.train_on_batch(
+                    train_batch,
+                    cql_weight=online_cql,
+                    use_ovm=use_ovm,
+                    t_env=t_env,
+                    episode_delta=episode_delta_i,
+                    td_row_mask=td_row_mask,
+                )
+            train_logs = {
+                **logs,
+                "t_env": t_env,
+                "online_buffer": len(online_buffer),
+                "transfer/mode": mode,
+            }
+            if muapr is not None:
+                train_logs["muapr/kl_offline_frac"] = kl_offline_frac
+            if road is not None:
+                train_logs["road/ratio"] = float(step_mix)
+                train_logs["road/eff_offline_frac"] = eff_offline_frac
+            logger.write(train_logs)
+            tracked_prefixes = ("train_ovm/", "support/", "sapr/", "muapr/", "ackf/", "so2/")
+            if any(k.startswith(tracked_prefixes) for k in logs):
+                train_stats.append(
+                    {k: v for k, v in logs.items() if k.startswith(tracked_prefixes)}
+                )
         if road is not None:
             road_row = road.after_train_step(offline_data, online_buffer, t_env)
             if road_row is not None:
                 logger.write(road_row, force=True)
-        tracked_prefixes = ("train_ovm/", "support/", "sapr/", "muapr/", "ackf/")
-        if any(k.startswith(tracked_prefixes) for k in logs):
-            train_stats.append(
-                {k: v for k, v in logs.items() if k.startswith(tracked_prefixes)}
-            )
 
         # SAPR version boundary: freeze the current online policy, run random
         # local-intervention probes on fresh seeded environments, and move the

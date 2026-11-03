@@ -9,7 +9,7 @@ and are fully differentiable, so
 
     m_k = -d J_val(theta_{k+K}(z)) / dz + kappa * z
 
-is exact (finite differences in ``tests/test_muapr.py``).
+is exact.
 """
 
 from __future__ import annotations

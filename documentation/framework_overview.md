@@ -271,8 +271,6 @@ bash scripts/run_ovmse_macal_2halfcheetah.sh
 python scripts/eval_640.py --config <yaml> --checkpoint <ckpt.pt> \
   --episodes 640 --chunk 32 --out <out.jsonl> --tag <tag>
 
-# 单元测试
-python tests/test_macal.py
 ```
 
 覆盖任意配置项用 Hydra 风格的点路径，比如 `python train.py --config configs/5m_vs_6m.yaml seed=2 task.dataset=Medium-Replay system.mixing_ratio=0.0`。

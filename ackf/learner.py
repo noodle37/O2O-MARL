@@ -7,7 +7,12 @@ A frozen offline QMIX encoder supplies a per-agent knowledge representation
 action-level residual, and one learnable scalar gate per agent controls how
 much of the residual is fused with the online utility.  The online network,
 mixer, adapter and gates are trained jointly with the team-level QMIX TD loss;
-the offline encoder never receives gradients.
+by default the offline encoder never receives gradients.
+
+The ``variant`` switch removes exactly one component of that design at a time
+for the main ablation: ``no_adapter`` uses the offline utility itself as the
+residual, ``no_gate`` fixes the fusion weight to one, and ``unfrozen_encoder``
+lets the offline encoder take TD gradients.
 """
 
 from __future__ import annotations
@@ -53,6 +58,7 @@ class ACKFLearner(QMIXBase):
         target_update_interval: int = 200,
         batch_size_run: int = 1,
         add_agent_id_to_obs: bool = True,
+        variant: str = "full",
         adapter_hidden_dim: int = 64,
         adapter_init_std: float = 1e-2,
         gate_init: float = 0.1,
@@ -65,6 +71,7 @@ class ACKFLearner(QMIXBase):
         self.n_actions = int(n_actions)
         self.obs_dim = int(obs_dim)
         self.state_dim = int(state_dim)
+        self.learning_rate = float(learning_rate)
         self.gamma = float(gamma)
         self.td_lambda = float(td_lambda)
         self.grad_norm_clip = float(grad_norm_clip)
@@ -72,6 +79,15 @@ class ACKFLearner(QMIXBase):
         self.batch_size_run = int(batch_size_run)
         self.add_agent_id_to_obs = bool(add_agent_id_to_obs)
         self.hidden_dim = int(recurrent_layer_dim)
+        self.variant = str(variant).lower()
+        if self.variant not in ("full", "no_adapter", "no_gate", "unfrozen_encoder"):
+            raise ValueError(
+                "ackf.variant must be one of full, no_adapter, no_gate, "
+                f"unfrozen_encoder; got {variant!r}"
+            )
+        self.use_adapter = self.variant != "no_adapter"
+        self.use_gate = self.variant != "no_gate"
+        self.freeze_offline_encoder = self.variant != "unfrozen_encoder"
         self.gate_init = float(gate_init)
         if not 0.0 < self.gate_init < 1.0:
             raise ValueError(f"gate_init must be in (0, 1), got {gate_init}")
@@ -108,22 +124,30 @@ class ACKFLearner(QMIXBase):
         for param in self.knowledge_norm.parameters():
             param.requires_grad_(False)
 
-        self.knowledge_adapter = KnowledgeAdapter(
-            knowledge_dim,
-            self.n_agents,
-            self.n_actions,
-            hidden_dim=int(adapter_hidden_dim),
-            init_std=float(adapter_init_std),
-        ).to(self.device)
-        self.target_knowledge_adapter = copy.deepcopy(self.knowledge_adapter).to(self.device)
+        self.knowledge_adapter: Optional[KnowledgeAdapter] = None
+        self.target_knowledge_adapter: Optional[KnowledgeAdapter] = None
+        if self.use_adapter:
+            self.knowledge_adapter = KnowledgeAdapter(
+                knowledge_dim,
+                self.n_agents,
+                self.n_actions,
+                hidden_dim=int(adapter_hidden_dim),
+                init_std=float(adapter_init_std),
+            ).to(self.device)
+            self.target_knowledge_adapter = copy.deepcopy(
+                self.knowledge_adapter
+            ).to(self.device)
 
-        gate_logit = math.log(self.gate_init / (1.0 - self.gate_init))
-        self.gate_psi = torch.nn.Parameter(
-            torch.full((self.n_agents,), gate_logit, device=self.device)
-        )
-        self.target_gate_psi = torch.nn.Parameter(
-            self.gate_psi.detach().clone().to(self.device), requires_grad=False
-        )
+        self.gate_psi: Optional[torch.nn.Parameter] = None
+        self.target_gate_psi: Optional[torch.nn.Parameter] = None
+        if self.use_gate:
+            gate_logit = math.log(self.gate_init / (1.0 - self.gate_init))
+            self.gate_psi = torch.nn.Parameter(
+                torch.full((self.n_agents,), gate_logit, device=self.device)
+            )
+            self.target_gate_psi = torch.nn.Parameter(
+                self.gate_psi.detach().clone().to(self.device), requires_grad=False
+            )
 
         self.offline_q_network: Optional[MarlcRNN] = None
         self.offline_mixer: Optional[QMixer] = None
@@ -134,11 +158,18 @@ class ACKFLearner(QMIXBase):
             list(self.q_network.parameters()) + list(self.mixer.parameters()),
             lr=learning_rate,
         )
-        self.adapter_optimizer = torch.optim.Adam(
-            self.knowledge_adapter.parameters(), lr=learning_rate
+        self.offline_optimizer: Optional[torch.optim.Adam] = None
+        self.adapter_optimizer: Optional[torch.optim.Adam] = (
+            torch.optim.Adam(self.knowledge_adapter.parameters(), lr=learning_rate)
+            if self.knowledge_adapter is not None
+            else None
         )
-        self.gate_optimizer = torch.optim.Adam(
-            [self.gate_psi], lr=float(gate_lr_scale) * float(learning_rate)
+        self.gate_optimizer: Optional[torch.optim.Adam] = (
+            torch.optim.Adam(
+                [self.gate_psi], lr=float(gate_lr_scale) * float(learning_rate)
+            )
+            if self.gate_psi is not None
+            else None
         )
 
         self.episode_counter = 0
@@ -153,15 +184,32 @@ class ACKFLearner(QMIXBase):
 
     # ------------------------------------------------------------- offline setup
     def set_offline_encoder(self, q_network: MarlcRNN, mixer: Optional[QMixer] = None) -> None:
-        """Install and freeze the offline knowledge encoder."""
+        """Install the offline knowledge encoder, frozen unless ablated."""
         self.offline_q_network = q_network.to(self.device)
         self.offline_mixer = mixer.to(self.device) if mixer is not None else None
-        for net in (self.offline_q_network, self.offline_mixer):
+        encoder_trainable = not self.freeze_offline_encoder
+        for net, trainable in (
+            (self.offline_q_network, encoder_trainable),
+            (self.offline_mixer, False),
+        ):
             if net is None:
                 continue
-            net.eval()
+            if trainable:
+                net.train()
+            else:
+                net.eval()
             for param in net.parameters():
-                param.requires_grad_(False)
+                param.requires_grad_(trainable)
+        self._ensure_offline_optimizer()
+
+    def _ensure_offline_optimizer(self) -> None:
+        """Give the unfrozen encoder its own TD optimizer, if ablated."""
+        if self.freeze_offline_encoder or self.offline_q_network is None:
+            self.offline_optimizer = None
+            return
+        self.offline_optimizer = torch.optim.Adam(
+            self.offline_q_network.parameters(), lr=self.learning_rate
+        )
 
     def load_offline_for_ovm(self, path: str) -> None:
         """Load the pretrained QMIX checkpoint as the frozen offline encoder."""
@@ -186,28 +234,35 @@ class ACKFLearner(QMIXBase):
     def _sync_targets(self) -> None:
         self.target_q_network.load_state_dict(self.q_network.state_dict())
         self.target_mixer.load_state_dict(self.mixer.state_dict())
-        self.target_knowledge_adapter.load_state_dict(self.knowledge_adapter.state_dict())
-        self.target_gate_psi.data.copy_(self.gate_psi.detach())
+        if self.knowledge_adapter is not None:
+            self.target_knowledge_adapter.load_state_dict(
+                self.knowledge_adapter.state_dict()
+            )
+        if self.gate_psi is not None:
+            self.target_gate_psi.data.copy_(self.gate_psi.detach())
 
     def load_offline_state(self, payload: Dict[str, Any]) -> None:
         """Restore ACKF-only modules from a checkpoint, if present."""
-        if "ackf_adapter" not in payload:
-            return
-        self.knowledge_adapter.load_state_dict(payload["ackf_adapter"])
-        if "ackf_target_adapter" in payload:
-            self.target_knowledge_adapter.load_state_dict(payload["ackf_target_adapter"])
-        if "ackf_gate_psi" in payload:
-            self.gate_psi.data.copy_(
-                torch.as_tensor(payload["ackf_gate_psi"], device=self.device)
-            )
-        if "ackf_target_gate_psi" in payload:
-            self.target_gate_psi.data.copy_(
-                torch.as_tensor(payload["ackf_target_gate_psi"], device=self.device)
-            )
-        if "ackf_adapter_optimizer" in payload:
-            self.adapter_optimizer.load_state_dict(payload["ackf_adapter_optimizer"])
-        if "ackf_gate_optimizer" in payload:
-            self.gate_optimizer.load_state_dict(payload["ackf_gate_optimizer"])
+        if self.knowledge_adapter is not None:
+            if "ackf_adapter" in payload:
+                self.knowledge_adapter.load_state_dict(payload["ackf_adapter"])
+            if "ackf_target_adapter" in payload:
+                self.target_knowledge_adapter.load_state_dict(
+                    payload["ackf_target_adapter"]
+                )
+            if "ackf_adapter_optimizer" in payload:
+                self.adapter_optimizer.load_state_dict(payload["ackf_adapter_optimizer"])
+        if self.gate_psi is not None:
+            if "ackf_gate_psi" in payload:
+                self.gate_psi.data.copy_(
+                    torch.as_tensor(payload["ackf_gate_psi"], device=self.device)
+                )
+            if "ackf_target_gate_psi" in payload:
+                self.target_gate_psi.data.copy_(
+                    torch.as_tensor(payload["ackf_target_gate_psi"], device=self.device)
+                )
+            if "ackf_gate_optimizer" in payload:
+                self.gate_optimizer.load_state_dict(payload["ackf_gate_optimizer"])
         if "ackf_offline_q_network" in payload:
             self.offline_q_network = copy.deepcopy(self.q_network).to(self.device)
             self.offline_q_network.load_state_dict(payload["ackf_offline_q_network"])
@@ -215,20 +270,36 @@ class ACKFLearner(QMIXBase):
             if "ackf_offline_mixer" in payload:
                 mixer.load_state_dict(payload["ackf_offline_mixer"])
             self.set_offline_encoder(self.offline_q_network, mixer)
+        if (
+            self.offline_optimizer is not None
+            and "ackf_offline_optimizer" in payload
+        ):
+            self.offline_optimizer.load_state_dict(payload["ackf_offline_optimizer"])
 
     def state_dicts(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {
-            "ackf_adapter": self.knowledge_adapter.state_dict(),
-            "ackf_target_adapter": self.target_knowledge_adapter.state_dict(),
-            "ackf_gate_psi": self.gate_psi.detach().cpu(),
-            "ackf_target_gate_psi": self.target_gate_psi.detach().cpu(),
-            "ackf_adapter_optimizer": self.adapter_optimizer.state_dict(),
-            "ackf_gate_optimizer": self.gate_optimizer.state_dict(),
-        }
+        out: Dict[str, Any] = {"ackf_variant": self.variant}
+        if self.knowledge_adapter is not None:
+            out.update(
+                {
+                    "ackf_adapter": self.knowledge_adapter.state_dict(),
+                    "ackf_target_adapter": self.target_knowledge_adapter.state_dict(),
+                    "ackf_adapter_optimizer": self.adapter_optimizer.state_dict(),
+                }
+            )
+        if self.gate_psi is not None:
+            out.update(
+                {
+                    "ackf_gate_psi": self.gate_psi.detach().cpu(),
+                    "ackf_target_gate_psi": self.target_gate_psi.detach().cpu(),
+                    "ackf_gate_optimizer": self.gate_optimizer.state_dict(),
+                }
+            )
         if self.offline_q_network is not None:
             out["ackf_offline_q_network"] = self.offline_q_network.state_dict()
         if self.offline_mixer is not None:
             out["ackf_offline_mixer"] = self.offline_mixer.state_dict()
+        if self.offline_optimizer is not None:
+            out["ackf_offline_optimizer"] = self.offline_optimizer.state_dict()
         return out
 
     # ----------------------------------------------------------------- unrolling
@@ -280,24 +351,30 @@ class ACKFLearner(QMIXBase):
 
     def _offline_knowledge(
         self, obs_aug: torch.Tensor, resets: torch.Tensor
-    ) -> torch.Tensor:
-        """e_off = LN([h_off; q_off]) under the frozen encoder."""
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return (e_off, q_off), with e_off = LN([h_off; q_off])."""
         if self.offline_q_network is None:
             raise RuntimeError(
-                "ACKF requires a frozen offline encoder; enable transfer.load_offline_nets"
+                "ACKF requires an offline encoder; enable transfer.load_offline_nets"
             )
-        with torch.no_grad():
-            h_off, q_off = self._unroll_with_hidden(
-                self.offline_q_network, obs_aug, resets
-            )
-            knowledge = self.knowledge_norm(torch.cat([h_off, q_off], dim=-1))
-        return knowledge.detach()
+        if self.freeze_offline_encoder:
+            with torch.no_grad():
+                h_off, q_off = self._unroll_with_hidden(
+                    self.offline_q_network, obs_aug, resets
+                )
+                knowledge = self.knowledge_norm(torch.cat([h_off, q_off], dim=-1))
+            return knowledge.detach(), q_off.detach()
+        h_off, q_off = self._unroll_with_hidden(
+            self.offline_q_network, obs_aug, resets
+        )
+        return self.knowledge_norm(torch.cat([h_off, q_off], dim=-1)), q_off
 
     def _fused_utilities(
         self,
         obs_aug: torch.Tensor,
         resets: torch.Tensor,
         knowledge: torch.Tensor,
+        q_off: torch.Tensor,
         *,
         target: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -308,8 +385,16 @@ class ACKFLearner(QMIXBase):
         )
         psi = self.target_gate_psi if target else self.gate_psi
         _, q_on = self._unroll_with_hidden(net, obs_aug, resets)
-        delta_q = adapter(knowledge, self._agent_ids_like(knowledge))
-        gate = torch.sigmoid(psi).view(1, 1, self.n_agents, 1)
+        if adapter is not None:
+            delta_q = adapter(knowledge, self._agent_ids_like(knowledge))
+        else:
+            delta_q = q_off
+        if psi is not None:
+            gate = torch.sigmoid(psi).view(1, 1, self.n_agents, 1)
+        else:
+            gate = torch.ones(
+                1, 1, self.n_agents, 1, device=q_on.device, dtype=q_on.dtype
+            )
         fused = q_on + gate * delta_q
         return fused, q_on, delta_q, gate
 
@@ -355,14 +440,14 @@ class ACKFLearner(QMIXBase):
 
         obs_aug = self._augment_obs(batch["obs"], actions)
         resets = self._resets_from_batch(batch)
-        knowledge = self._offline_knowledge(obs_aug, resets)
+        knowledge, q_off = self._offline_knowledge(obs_aug, resets)
 
         fused, q_on, delta_q, gate = self._fused_utilities(
-            obs_aug, resets, knowledge, target=False
+            obs_aug, resets, knowledge, q_off, target=False
         )
         with torch.no_grad():
             target_fused, _, _, _ = self._fused_utilities(
-                obs_aug, resets, knowledge, target=True
+                obs_aug, resets, knowledge, q_off, target=True
             )
 
         chosen_q = torch.gather(fused, 3, actions.long())
@@ -388,27 +473,38 @@ class ACKFLearner(QMIXBase):
 
         self.training_step_ctr += 1
         self.optimizer.zero_grad(set_to_none=True)
-        self.adapter_optimizer.zero_grad(set_to_none=True)
-        self.gate_optimizer.zero_grad(set_to_none=True)
+        if self.offline_optimizer is not None:
+            self.offline_optimizer.zero_grad(set_to_none=True)
+        if self.adapter_optimizer is not None:
+            self.adapter_optimizer.zero_grad(set_to_none=True)
+        if self.gate_optimizer is not None:
+            self.gate_optimizer.zero_grad(set_to_none=True)
         loss.backward()
 
-        trainable = (
-            list(self.q_network.parameters())
-            + list(self.mixer.parameters())
-            + list(self.knowledge_adapter.parameters())
-            + [self.gate_psi]
+        trainable = list(self.q_network.parameters()) + list(
+            self.mixer.parameters()
         )
+        if self.knowledge_adapter is not None:
+            trainable += list(self.knowledge_adapter.parameters())
+        if self.gate_psi is not None:
+            trainable.append(self.gate_psi)
+        if not self.freeze_offline_encoder:
+            trainable += list(self.offline_q_network.parameters())
         grad_norm = torch.tensor(0.0, device=self.device)
         if self.grad_norm_clip > 0:
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable, self.grad_norm_clip)
         gate_grad = (
             0.0
-            if self.gate_psi.grad is None
+            if self.gate_psi is None or self.gate_psi.grad is None
             else float(self.gate_psi.grad.detach().abs().mean().item())
         )
         self.optimizer.step()
-        self.adapter_optimizer.step()
-        self.gate_optimizer.step()
+        if self.offline_optimizer is not None:
+            self.offline_optimizer.step()
+        if self.adapter_optimizer is not None:
+            self.adapter_optimizer.step()
+        if self.gate_optimizer is not None:
+            self.gate_optimizer.step()
 
         self.episode_counter += int(episode_delta)
         if (
@@ -422,7 +518,11 @@ class ACKFLearner(QMIXBase):
             delta_valid = delta_q[:, :-1][valid]
             fusion_valid = (gate * delta_q)[:, :-1][valid]
             q_on_valid = q_on[:, :-1][valid]
-            gate_values = torch.sigmoid(self.gate_psi)
+            gate_values = (
+                torch.sigmoid(self.gate_psi)
+                if self.gate_psi is not None
+                else torch.ones(self.n_agents, device=self.device)
+            )
             stats = {
                 "ackf/gate_mean": float(gate_values.mean().item()),
                 "ackf/gate_min": float(gate_values.min().item()),
@@ -509,7 +609,11 @@ class ACKFLearner(QMIXBase):
         epsilon_dec = 0.0 if eps <= 0.0 else eps / self.n_agents
         sequential = bool(getattr(self, "sequential_explore", False)) and eps > 0.0
         explorer = int(np.random.randint(self.n_agents)) if sequential else -1
-        gate = torch.sigmoid(self.gate_psi)
+        gate = (
+            torch.sigmoid(self.gate_psi)
+            if self.gate_psi is not None
+            else torch.ones(self.n_agents, device=self.device)
+        )
 
         actions: Dict[str, int] = {}
         chosen_q: List[float] = []
@@ -540,7 +644,10 @@ class ACKFLearner(QMIXBase):
             agent_id = F.one_hot(
                 torch.tensor(i, device=self.device), self.n_agents
             ).float().unsqueeze(0)
-            delta_q = self.knowledge_adapter(knowledge, agent_id)
+            if self.knowledge_adapter is not None:
+                delta_q = self.knowledge_adapter(knowledge, agent_id)
+            else:
+                delta_q = q_off
             fused_q = q_on + gate[i].view(1) * delta_q
             legal = torch.from_numpy(legals[agent]).bool().to(self.device)
             masked = fused_q[0].masked_fill(~legal, -1e9)

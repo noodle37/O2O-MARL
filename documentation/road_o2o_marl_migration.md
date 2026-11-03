@@ -333,11 +333,9 @@ road:
 
 `scripts/launch_road.sh`（由已移除的 `launch_fhjp.sh` 派生）保留 SEEDS/GPUS/MAPS/PLAN_ONLY 约定、共享离线 checkpoint 检查和"已完成即跳过"逻辑。`system_name` 写成 `MaROAD <map> seed<N>`；跳过判定的文件名为 `ovmse_paper_online_full_td_seed<N>.pt`（learner 仍是 `PaperQMIXLearner`），输出目录为 `checkpoints/road_<map>/seed<N>`，日志在 `logs/road_batch/`。ROAD 相关代码路径与日志前缀继续沿用 `road/`。
 
-### 5.6 测试 `tests/test_road.py`
+### 5.6 正确性检查
 
-沿用 `tests/test_fhjp.py` 的写法：只在 CPU 上运行，用假网络和假环境，并带 `__main__` 入口。
-
-| 测试 | 断言 |
+| 检查项 | 断言 |
 |---|---|
 | bandit 先轮询 | 前 $|\Lambda|$ 次 `select()` 恰好各返回一个臂 |
 | bandit 偏好高奖励 | 固定奖励（某臂最高）下，足够多轮后该臂的选择占比超过 0.5 |
