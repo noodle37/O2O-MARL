@@ -9,7 +9,6 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-import wandb
 
 
 class BaseLogger:
@@ -68,7 +67,12 @@ class WandbLogger(BaseLogger):
         entity: Optional[str] = None,
         log_every: int = 2,  # seconds
     ):
-        wandb.init(name=name, project=project, notes=notes, tags=tags, entity=entity, config=config)
+        import wandb
+
+        self._wandb = wandb
+        self._wandb.init(
+            name=name, project=project, notes=notes, tags=tags, entity=entity, config=config
+        )
 
         self._log_every = log_every
         self._ctr = 0
@@ -76,7 +80,7 @@ class WandbLogger(BaseLogger):
 
     def write(self, logs: Dict[str, Any], force: bool = False) -> None:
         if time.time() - self._last_log > self._log_every or force:
-            wandb.log(logs)
+            self._wandb.log(logs)
 
             for key, log in logs.items():
                 print(f"{key}: {float(log)} |", end=" ")
@@ -88,4 +92,4 @@ class WandbLogger(BaseLogger):
         self._ctr += 1
 
     def close(self) -> None:
-        wandb.finish()
+        self._wandb.finish()

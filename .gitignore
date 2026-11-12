@@ -8,3 +8,9 @@ wandb/
 *.pdf
 experiments/
 .stepcode/
+*.out
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.npz
