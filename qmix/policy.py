@@ -23,13 +23,22 @@ class EvalPolicyMixin:
 
 
     def new_episode_state(self) -> Dict[str, Any]:
-        return {
+        state = {
             "rnn": {
                 f"agent_{i}": self.q_network.initial_state(1, self.device)
                 for i in range(self.n_agents)
             },
             "last": {},
         }
+        # The frozen offline prior may drive a subset of the agents (the
+        # "cooperative team" ablation), so it needs its own hidden state.
+        offline_net = getattr(self, "offline_q_network", None)
+        if offline_net is not None:
+            state["offline_rnn"] = {
+                f"agent_{i}": offline_net.initial_state(1, self.device)
+                for i in range(self.n_agents)
+            }
+        return state
 
     def reset_eval_hidden(self) -> None:
         state = self.new_episode_state()
@@ -37,6 +46,10 @@ class EvalPolicyMixin:
         self.eval_last_actions = state["last"]
         self.eval_offline_rnn = None
         self.eval_offline_last_actions = None
+        # Hidden state of the frozen offline prior when it drives a subset of
+        # the agents.  It is kept apart from ``eval_offline_rnn`` so that the
+        # offline diagnostics below can unroll the prior a second time.
+        self.eval_frozen_rnn = None
         offline_net = getattr(self, "offline_q_network", None)
         if offline_net is not None:
             self.eval_offline_rnn = {
@@ -44,6 +57,10 @@ class EvalPolicyMixin:
                 for i in range(self.n_agents)
             }
             self.eval_offline_last_actions = {}
+            self.eval_frozen_rnn = {
+                f"agent_{i}": offline_net.initial_state(1, self.device)
+                for i in range(self.n_agents)
+            }
 
     def select_actions_eval(
         self,
@@ -58,15 +75,23 @@ class EvalPolicyMixin:
         if state is None:
             rnn_state = self.eval_rnn
             last_actions = self.eval_last_actions
+            offline_rnn_state = getattr(self, "eval_frozen_rnn", None)
         else:
             rnn_state = state["rnn"]
             last_actions = state["last"]
+            offline_rnn_state = state.get("offline_rnn")
         epsilon_dec = 0.0 if eps <= 0.0 else eps / self.n_agents
         # Sequential exploration (OVMSE paper style): at each step exactly one
         # agent explores with the scheduled epsilon, all others act greedily.
         # With eps <= 0 this degenerates to the plain greedy policy.
         sequential = bool(getattr(self, "sequential_explore", False)) and eps > 0.0
         explorer = int(np.random.randint(self.n_agents)) if sequential else -1
+        # Teammate-cooperation condition: the listed agents keep playing the
+        # frozen offline prior instead of the online policy, so the offline
+        # joint action no longer describes the team that is being trained.
+        frozen_agents = getattr(self, "coop_frozen_set", frozenset())
+        offline_net = getattr(self, "offline_q_network", None)
+        use_frozen = bool(frozen_agents) and offline_net is not None and offline_rnn_state is not None
         actions = {}
         chosen_q: List[float] = []
         offline_chosen_q: List[float] = []
@@ -98,7 +123,21 @@ class EvalPolicyMixin:
                 explore_here = i == explorer and np.random.rand() < eps
             else:
                 explore_here = np.random.rand() < epsilon_dec
-            if explore_here:
+            if use_frozen and i in frozen_agents:
+                # The agent keeps playing the frozen offline prior.  The
+                # exploration rate is unchanged, so the noise level of the team
+                # matches the cooperative condition.
+                with torch.no_grad():
+                    q_frozen, offline_rnn_state[agent] = offline_net(
+                        obs_in, offline_rnn_state.get(agent)
+                    )
+                    q_frozen = q_frozen[0].masked_fill(~legal, -1e9)
+                if explore_here:
+                    legal_idx = torch.nonzero(legal, as_tuple=False).squeeze(-1)
+                    a = int(legal_idx[torch.randint(legal_idx.numel(), (1,))].item())
+                else:
+                    a = int(torch.argmax(q_frozen).item())
+            elif explore_here:
                 legal_idx = torch.nonzero(legal, as_tuple=False).squeeze(-1)
                 a = int(legal_idx[torch.randint(legal_idx.numel(), (1,))].item())
             else:

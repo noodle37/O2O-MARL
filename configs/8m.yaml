@@ -1,0 +1,56 @@
+# Paper OVMSE offline recipe on SMACv1 8m (OG-MARL core, Medium).
+system_name: "ovmse_paper 8m"
+seed: 1
+wandb_project: og-marl
+phase: offline
+t_max: 10000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: true
+checkpoint_dir: checkpoints/ovmse_paper_8m
+behaviour_cache_dir: checkpoints/ovmse_paper_8m/behaviour
+checkpoint_path: checkpoints/ovmse_paper_8m/ovmse_paper_seed1_best.pt
+log_path: checkpoints/ovmse_paper_8m/offline.jsonl
+
+task:
+  source: og_marl
+  env: smac_v1
+  scenario: 8m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 50.0
+  softmax_temp: 0.5
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  online_cql_weight: 0.0
+  mixing_ratio: 0.1
+  lambda_memory_end: 0.1
+  lambda_anneal_steps: 200000
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+
+online:
+  t_max: 3000000
+  use_ovm: true
+
+transfer:
+  mode: ovmse

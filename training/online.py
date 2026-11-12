@@ -28,6 +28,7 @@ from road.controller import build_road_controller
 from sapr.controller import build_sapr_controller
 from so2.learner import SO2Learner
 from sapr.probe import probe_prior_utility
+from tcpa.learner import TCPALearner
 from training.evaluation import evaluate
 from training.factory import build_learner, load_vault_dataset, make_env, make_logger
 from training.rollout import collect_parallel, merge_offline_online, stack_episodes
@@ -524,6 +525,15 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
             f"n_upc={learner.n_upc}",
             flush=True,
         )
+    if isinstance(learner, TCPALearner):
+        print(
+            f"[tcpa] variant={learner.variant} eta_prior={learner.eta_prior} "
+            f"tau_g_mode={learner.tau_g_mode} tau_g_fixed={learner.tau_g_fixed} "
+            f"gate_mode={learner.gate_mode} warmup_steps={learner.warmup_steps} "
+            f"use_residual={learner.use_residual} "
+            f"offline_prior={'loaded' if learner.offline_q_network is not None else 'MISSING'}",
+            flush=True,
+        )
     if road is not None:
         print(
             f"[road] arms={road.arms} kappa={road.kappa} c={road.c} "
@@ -796,7 +806,15 @@ def run_online(cfg: Dict[str, Any], offline_ckpt: Optional[str] = None) -> None:
                 train_logs["road/ratio"] = float(step_mix)
                 train_logs["road/eff_offline_frac"] = eff_offline_frac
             logger.write(train_logs)
-            tracked_prefixes = ("train_ovm/", "support/", "sapr/", "muapr/", "ackf/", "so2/")
+            tracked_prefixes = (
+                "train_ovm/",
+                "support/",
+                "sapr/",
+                "muapr/",
+                "ackf/",
+                "so2/",
+                "tcpa/",
+            )
             if any(k.startswith(tracked_prefixes) for k in logs):
                 train_stats.append(
                     {k: v for k, v in logs.items() if k.startswith(tracked_prefixes)}

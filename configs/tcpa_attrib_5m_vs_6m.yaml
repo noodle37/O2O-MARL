@@ -1,0 +1,98 @@
+# TCPA 约束归因实验 (constraint attribution), 5m_vs_6m, online phase.
+#
+# 问题：在线阶段前期保护旧动作的收益，到底来自
+#   H1「训练早期普遍需要约束」            —— 与约束的内容无关，是一个通用的早期正则
+#   H2「只有某些队友配合下才应该保留旧动作」—— 收益来自保留了真正协作的旧联合动作，
+#                                             而这类旧动作只在队友仍按旧方式配合时才成立
+#
+# 做法：2（约束档位）× 2（队友配合条件）的析因设计。
+#   约束档位 tcpa.variant:
+#     no_igm      不加任何约束（TD only）
+#     value_anchor 通用价值约束：把在线 Q 拉向冻结的离线 Q（L1 trust region），
+#                  不选任何动作 -> H1 的代表
+#     placebo     安慰剂：与 full 完全同形的 IGM hinge、同一个 gate、同一权重，
+#                  但被保留的“旧动作”换成随机合法动作 -> 排除“只要有约束形式就有效”
+#     full        真 TCPA：team-gated IGM hinge 保留离线贪心联合动作 -> H2 的代表
+#
+#   队友配合条件 coop:
+#     mode: default        全队都按在线策略行动（配合条件成立）
+#     mode: frozen_offline 队友冻结在离线先验上、只有焦点智能体在线学（配合条件被破坏）
+#                  —— 队友动作仍来自一个网络，训练数据不含随机乱走的样本；
+#                     旧联合动作不再描述当前这支队伍。
+#
+# 与已跑完的 TCPA 6 臂×3 seed×3M 步矩阵同源（同一离线先验、同一在线协议），
+# 只是预算截到 1M 步、评估环境固定种子，使各臂在每个 t_env 上跑的是同一批对局。
+system_name: "tcpa attrib 5m_vs_6m"
+learner_type: tcpa
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 1000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/tcpa_attrib_5m_vs_6m/prior_matched/seed1
+checkpoint_path: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/tcpa_attrib_5m_vs_6m/prior_matched/seed1/online.jsonl
+# 专用评估环境：各臂在同一个 t_env 上跑的是同一批对局，臂间比较可配对。
+eval_env_seed: 424242
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 1000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+  load_offline_nets: true
+
+tcpa:
+  # full | no_igm | value_anchor | placebo | fixed_gate | abs_q | gate_anti | no_residual
+  variant: full
+  eta_prior: 0.1
+  # value_anchor 的权重；null 表示与 eta_prior 相同。
+  eta_anchor: null
+  tau_g: auto
+  gate_mode: dynamic
+  warmup_steps: 0
+  regret_ema_decay: 0.1
+
+coop:
+  # default | frozen_offline
+  mode: default
+  # 冻结在离线先验上的智能体下标（0 是焦点智能体，始终在线学）。
+  frozen_agents: []

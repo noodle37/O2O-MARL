@@ -1,0 +1,72 @@
+# MaCal-QL joint offline+online run on 2s3z (single phase, from scratch).
+#
+# Companion arms in the same batch:
+#   OVMSE   configs/2s3z.yaml       offline 3M filled steps -> online 1M env steps
+#   MaROAD  configs/road_2s3z.yaml  online 1M env steps from the shared OVMSE ckpt
+#   MaCal   this file               one joint run over 1M online env steps
+#
+# MaCal-QL never pretrains here: every training batch mixes offline vault
+# episodes with fresh online rollouts (mixing_ratio is the offline episode
+# fraction), and the calibrated CQL term stays on for the whole run. This is
+# the "trained together" variant, not OVMSE's offline-then-online chain.
+#
+# The joint run starts from randomly initialised QMIX weights
+# (transfer.mode=scratch). checkpoint_path is only used by run_online's
+# resolver, which requires an existing file even for scratch runs; its weights
+# are not loaded and no offline network is frozen (load_offline_nets=false).
+learner_type: macal_ql
+system_name: "MaCal-QL 2s3z joint"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 1000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 2
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/2s3z_three_algos_20261105/macal_2s3z_medium/joint
+checkpoint_path: checkpoints/ovmse_batch_20261014/2s3z_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/2s3z_three_algos_20261105/macal_2s3z_medium/joint/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 2s3z
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  grad_norm_clip: 10.0
+  # batch_size_run 2 here vs 8 in configs/macal_5m_vs_6m.yaml: 50 keeps the same
+  # 25 gradient steps between target refreshes.
+  target_update_interval: 50
+  add_agent_id_to_obs: true
+  num_ood_actions: 10
+  cql_weight: 1.0
+  dual_alpha: true
+  target_action_gap: 0.8
+  alpha_lr: 0.0001
+  alpha_init: 1.0
+  eps_start: 1.0
+  eps_min: 0.05
+  # Same exploration schedule as the OVMSE 2s3z online phase.
+  eps_decay_steps: 100000
+  # Half the training batch is offline data, matching Cal-QL's usual 50/50 mix
+  # and the OVMSE paper's best MACQL mixing ratio on 5m_vs_6m.
+  mixing_ratio: 0.5
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 1000000
+  test_interval: 10000
+
+transfer:
+  mode: scratch
+  load_offline_nets: false

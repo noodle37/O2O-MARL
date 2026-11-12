@@ -18,6 +18,7 @@ from macflow.learner import MACFlowLearner
 from ovmse.learner import PaperQMIXLearner
 from qmix.core import QMIXBase
 from so2.learner import SO2Learner
+from tcpa.learner import TCPALearner
 from uot.learner import UOTLearner
 from uot.support import RecordedJoints, StateSupport
 from utils.logger import JsonlLogger, WandbLogger
@@ -277,6 +278,41 @@ def build_learner(cfg: Dict[str, Any], dataset: EpisodeDataset) -> QMIXBase:
             alpha_lr=float(sys_cfg.get("alpha_lr", 1e-4)),
             alpha_init=float(sys_cfg.get("alpha_init", 1.0)),
             eps_min=float(sys_cfg.get("eps_min", 0.05)),
+            device=str(sys_cfg.get("device", "cuda")),
+        )
+    if learner_type == "tcpa":
+        tcpa = cfg.get("tcpa") or {}
+        coop = cfg.get("coop") or {}
+        return TCPALearner(
+            n_agents=s.n_agents,
+            n_actions=s.n_actions,
+            obs_dim=s.obs_dim,
+            state_dim=s.state_dim,
+            variant=str(tcpa.get("variant", "full")),
+            recurrent_layer_dim=int(sys_cfg.get("recurrent_layer_dim", 64)),
+            mixer_embed_dim=int(sys_cfg.get("mixer_embed_dim", 32)),
+            mixer_hyper_dim=int(sys_cfg.get("mixer_hyper_dim", 64)),
+            learning_rate=float(sys_cfg.get("learning_rate", 1e-3)),
+            gamma=float(sys_cfg.get("discount", 0.99)),
+            td_lambda=float(sys_cfg.get("td_lambda", 0.6)),
+            grad_norm_clip=float(sys_cfg.get("grad_norm_clip", 10.0)),
+            target_update_interval=int(sys_cfg.get("target_update_interval", 200)),
+            batch_size_run=int(cfg.get("batch_size_run", 1)),
+            add_agent_id_to_obs=bool(sys_cfg.get("add_agent_id_to_obs", True)),
+            eta_prior=float(tcpa.get("eta_prior", 0.1)),
+            eta_anchor=(
+                None
+                if tcpa.get("eta_anchor") is None
+                else float(tcpa.get("eta_anchor"))
+            ),
+            tau_g=tcpa.get("tau_g", "auto"),
+            tau_g_fixed=float(tcpa.get("tau_g_fixed", 1.0)),
+            gate_mode=str(tcpa.get("gate_mode", "dynamic")),
+            warmup_steps=int(tcpa.get("warmup_steps", 0)),
+            regret_ema_decay=float(tcpa.get("regret_ema_decay", 0.1)),
+            seed=int(cfg.get("seed", 0)),
+            coop_mode=str(coop.get("mode", "default")),
+            coop_frozen_agents=coop.get("frozen_agents", ()),
             device=str(sys_cfg.get("device", "cuda")),
         )
     if learner_type != "ovmse_paper":

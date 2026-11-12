@@ -1,0 +1,71 @@
+# TCPA (Team-Conditioned Prior Adaptation) on 2s3z, online phase.
+#
+# Offline collaboration prior: the CFCQL-D pretrained QMIX checkpoint used by
+# the other O2O arms on this map
+#   checkpoints/ovmse_batch_20261014/2s3z_offline/ovmse_paper_seed1_best.pt
+#
+# See configs/tcpa_5m_vs_6m.yaml for the method description; this file only
+# differs in the task and in the checkpoint/log paths.
+system_name: "tcpa 2s3z"
+learner_type: tcpa
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/tcpa_2s3z/full/seed1
+checkpoint_path: checkpoints/ovmse_batch_20261014/2s3z_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/tcpa_2s3z/full/seed1/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 2s3z
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+  load_offline_nets: true
+
+tcpa:
+  variant: full
+  eta_prior: 0.1
+  tau_g: auto
+  gate_mode: dynamic
+  warmup_steps: 0
+  regret_ema_decay: 0.1

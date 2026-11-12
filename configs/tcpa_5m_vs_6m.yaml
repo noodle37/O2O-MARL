@@ -1,0 +1,87 @@
+# TCPA (Team-Conditioned Prior Adaptation) on 5m_vs_6m, online phase.
+#
+# Offline collaboration prior: the CFCQL-D pretrained QMIX checkpoint that the
+# other O2O arms on this map start from
+#   checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+#
+# The online student is a residual QMIX:
+#   q_on(tau, a) = q_off(tau, a) + dq_phi(tau, a)      (dq_phi zero-initialised)
+#   Q_on(s, a)   = f_mix^psi(s, q_on)                   (psi initialised offline)
+# with the frozen offline prior retained through the team-conditioned gate
+#   R_t = Q_on(s_t, a_on*) - Q_on(s_t, a_off),  g_t = sg[exp(-R_t / tau_g)]
+#   L   = L_TD(lambda) + eta_prior * L_IGM(g_t).
+#
+# The offline-specific terms are off (cql_weight = 0, online_cql_weight = 0,
+# mixing_ratio = 0, use_ovm = false), so the only additions to plain QMIX TD
+# are the residual and the gated prior-retention term.
+system_name: "tcpa 5m_vs_6m"
+learner_type: tcpa
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/tcpa_5m_vs_6m/full/seed1
+checkpoint_path: checkpoints/ovmse_batch_20261014/5m_vs_6m_offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/tcpa_5m_vs_6m/full/seed1/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 5m_vs_6m
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: false
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+  load_offline_nets: true
+
+tcpa:
+  # full | no_residual | no_igm | fixed_gate | abs_q | gate_anti
+  variant: full
+  # Weight of the gated IGM ranking loss.
+  eta_prior: 0.1
+  # Team-regret temperature. "auto" calibrates it from the running mean of the
+  # regret (tau_g = EMA(R) / ln 2), which keeps the gate comparable across maps;
+  # a number switches to a fixed temperature.
+  tau_g: auto
+  gate_mode: dynamic
+  # Number of gradient steps before the prior-retention term is switched on.
+  # The hinge is zero while the offline action is still locally greedy, so the
+  # method needs no warmup by construction.
+  warmup_steps: 0
+  regret_ema_decay: 0.1

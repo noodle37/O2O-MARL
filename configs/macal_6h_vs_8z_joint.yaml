@@ -1,0 +1,68 @@
+# MaCal-QL joint offline+online run on 6h_vs_8z (single phase, from scratch).
+#
+# Same recipe as configs/macal_2s3z_joint.yaml: MaCal-QL never pretrains; every
+# training batch mixes offline vault episodes with fresh online rollouts
+# (mixing_ratio is the offline episode fraction) and the calibrated CQL term
+# stays on for the whole run. This is the continuous O2O variant, not the
+# offline-then-online chain that MaROAD uses.
+#
+# The run starts from randomly initialised QMIX weights (transfer.mode=scratch).
+# checkpoint_path only satisfies run_online's resolver, which requires an
+# existing file even for scratch runs; its weights are not loaded and no
+# offline network is frozen (load_offline_nets=false). The launcher creates a
+# tiny placeholder file for it.
+learner_type: macal_ql
+system_name: "MaCal-QL 6h_vs_8z joint"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/macal_6h_vs_8z/seed1
+checkpoint_path: checkpoints/macal_6h_vs_8z/scratch_anchor.pt
+log_path: checkpoints/macal_6h_vs_8z/seed1/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 6h_vs_8z
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  grad_norm_clip: 10.0
+  # batch_size_run 8 with a 200-step refresh keeps 25 gradient steps between
+  # target updates, matching configs/macal_5m_vs_6m.yaml.
+  target_update_interval: 200
+  add_agent_id_to_obs: true
+  num_ood_actions: 10
+  cql_weight: 1.0
+  dual_alpha: true
+  target_action_gap: 0.8
+  alpha_lr: 0.0001
+  alpha_init: 1.0
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  # Half the training batch is offline data, matching Cal-QL's usual 50/50 mix
+  # and the configs/macal_2s3z_joint.yaml recipe.
+  mixing_ratio: 0.5
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+
+transfer:
+  mode: scratch
+  load_offline_nets: false

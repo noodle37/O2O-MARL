@@ -1,0 +1,73 @@
+# MaROAD (ROAD migrated to QMIX / O2O MARL) on 6h_vs_8z, online phase only.
+# Starts from this map's own OVMSE offline checkpoint (configs/6h_vs_8z.yaml);
+# the launcher passes checkpoint_path explicitly. Only the online seed changes
+# across seeds.
+#
+# The inner learner is plain online QMIX TD (no OVM target, no CQL term); ROAD
+# only replaces the fixed mixing_ratio with the bandit's current arm, so
+# mixing_ratio: 0.0 below is a safety fallback and is overridden every step.
+system_name: "MaROAD 6h_vs_8z"
+seed: 1
+wandb_project: og-marl
+phase: online
+t_max: 3000000
+buffer_size: 5000
+batch_size: 128
+batch_size_run: 8
+test_interval: 10000
+num_eval_episodes: 32
+save_best_checkpoint: false
+checkpoint_dir: checkpoints/road_6h_vs_8z/seed1/online
+checkpoint_path: checkpoints/ovmse_6h_vs_8z/seed1/offline/ovmse_paper_seed1_best.pt
+log_path: checkpoints/road_6h_vs_8z/seed1/online/online.jsonl
+
+task:
+  source: cfcql
+  env: smac_v1
+  scenario: 6h_vs_8z
+  dataset: Medium
+
+system:
+  learning_rate: 0.001
+  linear_layer_dim: 64
+  recurrent_layer_dim: 64
+  mixer_embed_dim: 32
+  mixer_hyper_dim: 64
+  discount: 0.99
+  td_lambda: 0.6
+  target_update_interval: 200
+  grad_norm_clip: 10.0
+  add_agent_id_to_obs: true
+  raw_cql: false
+  moderate_lambda: true
+  cql_weight: 0.0
+  online_cql_weight: 0.0
+  num_ood_actions: 100
+  max_behaviour_filled_steps: 500000
+  mixing_ratio: 0.0
+  use_ovm: false
+  eps_start: 1.0
+  eps_min: 0.05
+  eps_decay_steps: 100000
+  device: cuda
+  data_device: cpu
+
+online:
+  t_max: 3000000
+  test_interval: 10000
+  use_ovm: false
+
+transfer:
+  mode: full_td
+
+road:
+  enabled: true
+  arms: [0.1, 0.2, 0.3, 0.4, 0.5]
+  kappa: 1.0
+  ucb_c: 2.0
+  window: 200
+  period_steps: 10
+  delta_batch: 32
+  normalize_reward: false
+  mask_explored: false
+  seed_offset: 7

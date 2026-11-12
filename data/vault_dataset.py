@@ -16,8 +16,10 @@ from utils.paths import VAULT_DIR
 
 SMAC_EPISODE_LIMIT: Dict[str, int] = {
     "2s3z": 120,
+    "3m": 60,
     "5m_vs_6m": 70,
     "6h_vs_8z": 150,
+    "8m": 120,
     "MMM": 150,
     "3s5z": 150,
     "3s5z_vs_3s6z": 170,

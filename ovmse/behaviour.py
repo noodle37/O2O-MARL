@@ -33,10 +33,11 @@ class BehaviourCloningMixin:
         cache_path: Optional[str] = None,
         batch_size: int = 128,
     ) -> None:
-        if cache_path and os.path.isdir(cache_path):
+        cache_file = os.path.join(cache_path, "behaviour.pt") if cache_path else None
+        if cache_file and os.path.isfile(cache_file):
             assert self.behaviour_network is not None
             self.behaviour_network.load_state_dict(
-                torch.load(os.path.join(cache_path, "behaviour.pt"), map_location=self.device)
+                torch.load(cache_file, map_location=self.device)
             )
             self.behaviour_network.eval()
             for p in self.behaviour_network.parameters():
